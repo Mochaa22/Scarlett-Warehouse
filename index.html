@@ -11144,6 +11144,14 @@
         });
       });
 
+      async function readJsonSafe(res) {
+        var ct = String((res.headers && res.headers.get('content-type')) || '').toLowerCase();
+        if (!ct.includes('application/json')) {
+          throw new Error('Server autentikasi tidak merespons dengan JSON (HTTP ' + res.status + '). Muat ulang halaman atau cek fungsi /api di hosting.');
+        }
+        return res.json();
+      }
+
       var setupForm = document.getElementById('form-app-setup-login');
       if (setupForm) {
         setupForm.addEventListener('submit', async function (e) {
@@ -11163,7 +11171,7 @@
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ email: emailVal, password: pw1 })
             });
-            var data = await res.json();
+            var data = await readJsonSafe(res);
             if (res.status === 409) {
               appAuthStatusCache.configured = true;
               appAuthStatusCache.envManaged = Boolean(data && data.envManaged);
@@ -11172,7 +11180,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email: emailVal, password: pw1 })
               });
-              var loginData = await loginRes.json();
+              var loginData = await readJsonSafe(loginRes);
               if (!loginRes.ok) {
                 throw new Error((loginData && loginData.error) || 'Akun login sudah aktif di server. Silakan masuk dengan email & password yang benar.');
               }
@@ -11208,7 +11216,7 @@
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ email: emailVal, password: pwVal })
             });
-            var data = await res.json();
+            var data = await readJsonSafe(res);
             if (!res.ok) {
               if (data && data.needsSetup) {
                 appAuthStatusCache.configured = false;
@@ -11228,30 +11236,42 @@
     }
 
     async function syncAppAuthStatus(preserveError) {
-      try {
-        var headers = appAuthToken ? { Authorization: 'Bearer ' + appAuthToken } : {};
-        var res = await fetch('/api/auth/status', { method: 'GET', headers: headers });
-        var st = await res.json();
-        var prevConfigured = appAuthStatusCache.configured;
-        appAuthStatusCache = {
-          loaded: true,
-          configured: Boolean(st.configured),
-          envManaged: Boolean(st.envManaged),
-          authenticated: Boolean(st.authenticated)
-        };
-        if (st.authenticated && st.email) {
-          setAuthUnlockedState(true, st.email, st.role);
-        } else {
-          setAuthUnlockedState(false, '', null);
-          if (!preserveError || prevConfigured !== appAuthStatusCache.configured) {
-            renderLoginScreen('');
+      var lastErr = null;
+      for (var attempt = 0; attempt < 2; attempt++) {
+        try {
+          var headers = appAuthToken ? { Authorization: 'Bearer ' + appAuthToken } : {};
+          var res = await fetch('/api/auth/status', { method: 'GET', headers: headers, cache: 'no-store' });
+          var ct = String((res.headers && res.headers.get('content-type')) || '').toLowerCase();
+          if (!res.ok || !ct.includes('application/json')) {
+            throw new Error('Server autentikasi tidak merespons dengan benar (HTTP ' + res.status + '). Coba muat ulang halaman.');
+          }
+          var st = await res.json();
+          var prevConfigured = appAuthStatusCache.configured;
+          appAuthStatusCache = {
+            loaded: true,
+            configured: Boolean(st.configured),
+            envManaged: Boolean(st.envManaged),
+            authenticated: Boolean(st.authenticated)
+          };
+          if (st.authenticated && st.email) {
+            setAuthUnlockedState(true, st.email, st.role);
+          } else {
+            setAuthUnlockedState(false, '', null);
+            if (!preserveError || prevConfigured !== appAuthStatusCache.configured) {
+              renderLoginScreen('');
+            }
+          }
+          return;
+        } catch (err) {
+          lastErr = err;
+          if (attempt === 0) {
+            await new Promise(function (resolve) { setTimeout(resolve, 450); });
           }
         }
-      } catch (err) {
-        appAuthStatusCache.loaded = true;
-        if (!preserveError) {
-          renderLoginScreen('Server autentikasi tidak merespons. Coba muat ulang halaman.');
-        }
+      }
+      appAuthStatusCache.loaded = true;
+      if (!preserveError) {
+        renderLoginScreen((lastErr && lastErr.message) || 'Server autentikasi tidak merespons. Coba muat ulang halaman.');
       }
     }
 

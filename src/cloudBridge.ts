@@ -3,7 +3,8 @@ import './firebase';
 async function apiJson<T>(url: string, init: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   const contentType = res.headers.get('content-type') || '';
-  const data = contentType.includes('application/json') ? await res.json() : await res.text();
+  const isJson = contentType.toLowerCase().includes('application/json');
+  const data = isJson ? await res.json() : await res.text();
   if (!res.ok) {
     const errObj = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : {};
     const err = new Error(String(errObj.error || `Request failed (${res.status})`)) as Error & {
@@ -13,6 +14,9 @@ async function apiJson<T>(url: string, init: RequestInit): Promise<T> {
     err.needsSetup = Boolean(errObj.needsSetup);
     err.status = res.status;
     throw err;
+  }
+  if (!isJson) {
+    throw new Error(`Endpoint ${url} tidak mengembalikan JSON (HTTP ${res.status}). Pastikan fungsi /api berjalan di server.`);
   }
   return data as T;
 }

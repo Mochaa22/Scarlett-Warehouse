@@ -2,7 +2,7 @@ import 'dotenv/config';
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
-import { createApp } from './server/createApp.js';
+import { createApp } from './api/_createApp.js';
 
 async function startServer() {
   const app = createApp();
