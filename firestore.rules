@@ -1,0 +1,637 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // === GLOBAL PRIMITIVES ===
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSuperAdmin() {
+      return isVerified() && (
+        request.auth.token.email == 'ferdiputraa793@gmail.com' ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['super_admin', 'owner'])
+      );
+    }
+
+    function isAdmin() {
+      return isVerified() && (
+        isSuperAdmin() ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'super_admin', 'owner'])
+      );
+    }
+
+    function isWarehouseOwner(warehouseId) {
+      return isVerified() &&
+        exists(/databases/$(database)/documents/warehouses/$(warehouseId)) &&
+        get(/databases/$(database)/documents/warehouses/$(warehouseId)).data.ownerId == request.auth.uid;
+    }
+
+    function allowsAssignedWarehouse(warehouseId) {
+      let email = request.auth.token.email.lower();
+      let assignmentPath = /databases/$(database)/documents/roleAssignments/$(email);
+      return !exists(assignmentPath) ||
+        get(assignmentPath).data.get('warehouseId', warehouseId) == warehouseId;
+    }
+
+    // === VALIDATION BLUEPRINTS ===
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'role', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.role is string && data.role in ['stockkeeper', 'admin', 'super_admin', 'owner']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRoleAssignment(data, assignmentId) {
+      return data.keys().hasAll(['id', 'email', 'displayName', 'role', 'assignedByUid', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'email', 'displayName', 'role', 'assignedByUid', 'createdAt', 'updatedAt', 'warehouseId', 'warehouseName'])
+        && data.id is string && data.id.size() >= 3 && data.id.size() <= 254
+        && (isValidId(data.id) || data.id == data.email)
+        && (!data.keys().hasAny(['warehouseId', 'warehouseName']) ||
+          (data.id == data.email && data.role == 'stockkeeper' &&
+            isValidId(data.warehouseId) && data.warehouseName is string &&
+            data.warehouseName.size() > 0 && data.warehouseName.size() <= 120))
+        && data.id == assignmentId
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254 && data.email == data.email.lower()
+        && data.displayName is string && data.displayName.size() <= 120
+        && data.role is string && data.role in ['stockkeeper', 'admin', 'super_admin']
+        && isValidId(data.assignedByUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateInfo(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.email is string && data.email.size() <= 254
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRecord(data, adminUid) {
+      return data.keys().hasAll(['uid', 'email', 'grantedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'grantedAt'])
+        && isValidId(data.uid)
+        && data.uid == adminUid
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && data.grantedAt is timestamp;
+    }
+
+    function isValidWarehouse(data, warehouseId) {
+      return data.keys().hasAll(['id', 'ownerId', 'kode', 'nama', 'cutoff', 'minStock', 'mode', 'coverDays', 'expMonths', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'kode', 'nama', 'cutoff', 'minStock', 'mode', 'coverDays', 'expMonths', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && data.id == warehouseId
+        && isValidId(data.ownerId)
+        && data.kode is string && data.kode.size() >= 1 && data.kode.size() <= 32
+        && data.nama is string && data.nama.size() >= 1 && data.nama.size() <= 120
+        && data.cutoff is string && data.cutoff.size() <= 32
+        && data.minStock is number && data.minStock >= 0
+        && data.mode is string && data.mode in ['mutasi', 'all']
+        && data.coverDays is number && data.coverDays >= 1
+        && data.expMonths is number && data.expMonths >= 1
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCatalogItem(data, warehouseId, itemId) {
+      return data.keys().hasAll(['id', 'warehouseId', 'ownerId', 'kind', 'barcode', 'sku', 'nama', 'kategori', 'lok', 'qty', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'kind', 'barcode', 'sku', 'nama', 'kategori', 'lok', 'qty', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && data.id == itemId
+        && isValidId(data.warehouseId)
+        && data.warehouseId == warehouseId
+        && isValidId(data.ownerId)
+        && data.kind is string && data.kind in ['master', 'lokasi', 'opening', 'allstock']
+        && data.barcode is string && data.barcode.size() <= 128
+        && data.sku is string && data.sku.size() <= 128
+        && data.nama is string && data.nama.size() <= 256
+        && data.kategori is string && data.kategori.size() <= 128
+        && data.lok is string && data.lok.size() <= 128
+        && data.qty is number
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTransaction(data, warehouseId, txId) {
+      return data.keys().hasAll(['id', 'warehouseId', 'ownerId', 'txType', 'tgl', 'barcode', 'sku', 'nama', 'lok', 'dari', 'ke', 'qty', 'inboundQty', 'sistem', 'fisik', 'selisih', 'exp', 'batch', 'ket', 'by', 'n', 'ancanthoDone', 'ancanthoBy', 'ancanthoKet', 'ancanthoAt', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'txType', 'tgl', 'barcode', 'sku', 'nama', 'lok', 'dari', 'ke', 'qty', 'inboundQty', 'sistem', 'fisik', 'selisih', 'exp', 'batch', 'ket', 'by', 'n', 'ancanthoDone', 'ancanthoBy', 'ancanthoKet', 'ancanthoAt', 'createdAt', 'updatedAt', 'supplier', 'driver', 'noPlat', 'noDoc', 'pairId', 'partnerWhId'])
+        && (!data.keys().hasAny(['supplier']) || (data.supplier is string && data.supplier.size() <= 128))
+        && (!data.keys().hasAny(['driver']) || (data.driver is string && data.driver.size() <= 128))
+        && (!data.keys().hasAny(['noPlat']) || (data.noPlat is string && data.noPlat.size() <= 128))
+        && (!data.keys().hasAny(['noDoc']) || (data.noDoc is string && data.noDoc.size() <= 128))
+        && (!data.keys().hasAny(['pairId']) || (data.pairId is string && data.pairId.size() <= 128))
+        && (!data.keys().hasAny(['partnerWhId']) || (data.partnerWhId is string && data.partnerWhId.size() <= 128))
+        && isValidId(data.id)
+        && data.id == txId
+        && isValidId(data.warehouseId)
+        && data.warehouseId == warehouseId
+        && isValidId(data.ownerId)
+        && data.txType is string && data.txType in ['masuk', 'keluar', 'pindah', 'opname']
+        && data.tgl is string && data.tgl.size() <= 32
+        && data.barcode is string && data.barcode.size() <= 128
+        && data.sku is string && data.sku.size() <= 128
+        && data.nama is string && data.nama.size() <= 256
+        && data.lok is string && data.lok.size() <= 128
+        && data.dari is string && data.dari.size() <= 128
+        && data.ke is string && data.ke.size() <= 128
+        && data.qty is number
+        && (data.inboundQty == null || data.inboundQty is number)
+        && data.sistem is number
+        && data.fisik is number
+        && data.selisih is number
+        && data.exp is string && data.exp.size() <= 32
+        && data.batch is string && data.batch.size() <= 128
+        && data.ket is string && data.ket.size() <= 500
+        && data.by is string && data.by.size() <= 120
+        && data.n is number
+        && data.ancanthoDone is bool
+        && data.ancanthoBy is string && data.ancanthoBy.size() <= 120
+        && data.ancanthoKet is string && data.ancanthoKet.size() <= 500
+        && data.ancanthoAt is string && data.ancanthoAt.size() <= 32
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBatch(data, warehouseId, batchId) {
+      return data.keys().hasAll(['id', 'warehouseId', 'ownerId', 'masukId', 'tglMasuk', 'lok', 'barcode', 'sku', 'nama', 'batch', 'exp', 'qty', 'status', 'ket', 'by', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'masukId', 'tglMasuk', 'lok', 'barcode', 'sku', 'nama', 'batch', 'exp', 'qty', 'status', 'ket', 'by', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && data.id == batchId
+        && isValidId(data.warehouseId)
+        && data.warehouseId == warehouseId
+        && isValidId(data.ownerId)
+        && data.masukId is string && data.masukId.size() <= 128
+        && data.tglMasuk is string && data.tglMasuk.size() <= 32
+        && data.lok is string && data.lok.size() <= 128
+        && data.barcode is string && data.barcode.size() <= 128
+        && data.sku is string && data.sku.size() <= 128
+        && data.nama is string && data.nama.size() <= 256
+        && data.batch is string && data.batch.size() <= 128
+        && data.exp is string && data.exp.size() <= 32
+        && data.qty is number && data.qty >= 0
+        && data.status is string && data.status in ['AKTIF', 'KARANTINA', 'SELESAI']
+        && data.ket is string && data.ket.size() <= 500
+        && data.by is string && data.by.size() <= 120
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDefect(data, warehouseId, defectId) {
+      return data.keys().hasAll(['id', 'warehouseId', 'ownerId', 'tgl', 'barcode', 'sku', 'nama', 'lok', 'kategori', 'qty', 'ket', 'by', 'status', 'tindakLanjut', 'resolvedAt', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'tgl', 'barcode', 'sku', 'nama', 'lok', 'kategori', 'qty', 'ket', 'by', 'status', 'tindakLanjut', 'resolvedAt', 'sumber', 'batch', 'exp', 'potongStok', 'createdAt', 'updatedAt'])
+        && (!data.keys().hasAny(['sumber']) || (data.sumber is string && data.sumber.size() <= 64))
+        && (!data.keys().hasAny(['batch']) || (data.batch is string && data.batch.size() <= 128))
+        && (!data.keys().hasAny(['exp']) || (data.exp is string && data.exp.size() <= 32))
+        && (!data.keys().hasAny(['potongStok']) || data.potongStok is bool)
+        && isValidId(data.id)
+        && data.id == defectId
+        && isValidId(data.warehouseId)
+        && data.warehouseId == warehouseId
+        && isValidId(data.ownerId)
+        && data.tgl is string && data.tgl.size() <= 32
+        && data.barcode is string && data.barcode.size() <= 128
+        && data.sku is string && data.sku.size() <= 128
+        && data.nama is string && data.nama.size() <= 256
+        && data.lok is string && data.lok.size() <= 128
+        && data.kategori is string && data.kategori.size() <= 128
+        && data.qty is number && data.qty >= 0
+        && data.ket is string && data.ket.size() <= 500
+        && data.by is string && data.by.size() <= 120
+        && data.status is string && data.status in ['KARANTINA', 'RETUR', 'MUSNAH', 'REPACK']
+        && data.tindakLanjut is string && data.tindakLanjut.size() <= 256
+        && data.resolvedAt is string && data.resolvedAt.size() <= 32
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCycleSession(data, warehouseId, sessionId) {
+      return data.keys().hasAll(['id', 'warehouseId', 'ownerId', 'tgl', 'picAdmin', 'picField', 'status', 'notes', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'tgl', 'picAdmin', 'picField', 'status', 'notes', 'judul', 'blindCount', 'closedAt', 'createdAt', 'updatedAt'])
+        && (!data.keys().hasAny(['judul']) || (data.judul is string && data.judul.size() <= 160))
+        && (!data.keys().hasAny(['blindCount']) || data.blindCount is bool)
+        && (!data.keys().hasAny(['closedAt']) || (data.closedAt is string && data.closedAt.size() <= 32))
+        && isValidId(data.id)
+        && data.id == sessionId
+        && isValidId(data.warehouseId)
+        && data.warehouseId == warehouseId
+        && isValidId(data.ownerId)
+        && data.tgl is string && data.tgl.size() <= 32
+        && data.picAdmin is string && data.picAdmin.size() <= 120
+        && data.picField is string && data.picField.size() <= 120
+        && data.status is string && data.status in ['OPEN', 'SELESAI']
+        && data.notes is string && data.notes.size() <= 500
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCycleLine(data, warehouseId, sessionId, lineId) {
+      return data.keys().hasAll(['id', 'warehouseId', 'sessionId', 'ownerId', 'sku', 'barcode', 'nama', 'lok', 'sysQty', 'prevDiff', 'physQty', 'countedBy', 'countedAt', 'notes', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'sessionId', 'ownerId', 'sku', 'barcode', 'nama', 'lok', 'kategori', 'assignedTo', 'sysQty', 'prevDiff', 'physQty', 'countedBy', 'countedAt', 'notes', 'status', 'createdAt', 'updatedAt'])
+        && (!data.keys().hasAny(['kategori']) || (data.kategori is string && data.kategori.size() <= 128))
+        && (!data.keys().hasAny(['assignedTo']) || (data.assignedTo is string && data.assignedTo.size() <= 120))
+        && isValidId(data.id)
+        && data.id == lineId
+        && isValidId(data.warehouseId)
+        && data.warehouseId == warehouseId
+        && isValidId(data.sessionId)
+        && data.sessionId == sessionId
+        && isValidId(data.ownerId)
+        && data.sku is string && data.sku.size() <= 128
+        && data.barcode is string && data.barcode.size() <= 128
+        && data.nama is string && data.nama.size() <= 256
+        && data.lok is string && data.lok.size() <= 128
+        && data.sysQty is number
+        && (data.prevDiff == null || data.prevDiff is number)
+        && (data.physQty == null || data.physQty is number)
+        && data.countedBy is string && data.countedBy.size() <= 120
+        && data.countedAt is string && data.countedAt.size() <= 32
+        && data.notes is string && data.notes.size() <= 500
+        && data.status is string && data.status in ['PENDING', 'COUNTED', 'VERIFIED']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidInboundEntry(data, warehouseId, entryId) {
+      return data.keys().hasAll(['id', 'warehouseId', 'ownerId', 'tgl', 'supplier', 'driver', 'noPlat', 'noDoc', 'barcode', 'sku', 'nama', 'exp', 'qty', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'tgl', 'supplier', 'driver', 'noPlat', 'noDoc', 'barcode', 'sku', 'nama', 'exp', 'qty', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && data.id == entryId
+        && isValidId(data.warehouseId)
+        && data.warehouseId == warehouseId
+        && isValidId(data.ownerId)
+        && data.tgl is string && data.tgl.size() <= 32
+        && data.supplier is string && data.supplier.size() <= 128
+        && data.driver is string && data.driver.size() <= 128
+        && data.noPlat is string && data.noPlat.size() <= 128
+        && data.noDoc is string && data.noDoc.size() <= 128
+        && data.barcode is string && data.barcode.size() <= 128
+        && data.sku is string && data.sku.size() <= 128
+        && data.nama is string && data.nama.size() <= 256
+        && data.exp is string && data.exp.size() <= 32
+        && data.qty is number && data.qty >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // === CONNECTION HEALTH CHECK ===
+    match /test/{docId} {
+      allow get: if docId == 'connection';
+      allow list, write: if false;
+    }
+
+    // === ADMINS DIRECTORY ===
+    match /admins/{adminUid} {
+      allow get: if isVerified() && isValidId(adminUid) && (request.auth.uid == adminUid || isSuperAdmin());
+      allow list: if false;
+      allow create, update, delete: if isSuperAdmin() && isValidId(adminUid) && isValidAdminRecord(incoming(), adminUid);
+    }
+
+    // === ROLE ASSIGNMENTS (SUPER ADMIN TEAM DIRECTORY) ===
+    match /roleAssignments/{assignmentId} {
+      allow get: if isVerified() && (isSuperAdmin() || assignmentId == request.auth.token.email.lower() || existing().email == request.auth.token.email.lower());
+      allow list: if isVerified() && (isSuperAdmin() || resource.data.email == request.auth.token.email.lower());
+      allow create: if isSuperAdmin()
+        && isValidRoleAssignment(incoming(), assignmentId)
+        && incoming().assignedByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSuperAdmin()
+        && isValidRoleAssignment(incoming(), assignmentId)
+        && incoming().id == existing().id
+        && incoming().assignedByUid == request.auth.uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isSuperAdmin();
+    }
+
+    // === USERS (PII ISOLATED) ===
+    match /users/{userId} {
+      allow get: if isVerified() && isValidId(userId) && (request.auth.uid == userId || isSuperAdmin());
+      allow list: if isVerified() && (resource.data.uid == request.auth.uid || isSuperAdmin());
+      allow create: if isVerified()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidUserProfile(incoming(), userId)
+        && incoming().role == 'stockkeeper'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isSuperAdmin() ||
+          (
+            request.auth.uid == userId &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt'])
+          )
+        );
+      allow delete: if isSuperAdmin() && isValidId(userId);
+
+      match /private/{docId} {
+        allow get: if isVerified() && isValidId(docId) && (request.auth.uid == userId || isSuperAdmin());
+        allow list: if false;
+        allow create: if isVerified()
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'info'
+          && request.auth.uid == userId
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && isValidUserPrivateInfo(incoming(), userId)
+          && incoming().updatedAt == request.time;
+        allow update: if isVerified()
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'info'
+          && (request.auth.uid == userId || isSuperAdmin())
+          && isValidUserPrivateInfo(incoming(), userId)
+          && incoming().uid == existing().uid
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']);
+        allow delete: if isSuperAdmin() && isValidId(userId) && isValidId(docId);
+      }
+    }
+
+    // === WAREHOUSES & SUBCOLLECTIONS ===
+    match /warehouses/{warehouseId} {
+      allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && (existing().ownerId == request.auth.uid || isAdmin());
+      allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
+        && isValidId(warehouseId)
+        && isValidWarehouse(incoming(), warehouseId)
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified() && allowsAssignedWarehouse(warehouseId)
+        && isValidId(warehouseId)
+        && isValidWarehouse(incoming(), warehouseId)
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['kode', 'nama', 'cutoff', 'minStock', 'mode', 'coverDays', 'expMonths', 'updatedAt'])
+          )
+        );
+      allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && (existing().ownerId == request.auth.uid || isAdmin());
+
+      match /catalog/{itemId} {
+        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(itemId) && (existing().ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
+          && isValidId(warehouseId)
+          && isValidId(itemId)
+          && isWarehouseOwner(warehouseId)
+          && isValidCatalogItem(incoming(), warehouseId, itemId)
+          && incoming().ownerId == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerified() && allowsAssignedWarehouse(warehouseId)
+          && isValidId(warehouseId)
+          && isValidId(itemId)
+          && isValidCatalogItem(incoming(), warehouseId, itemId)
+          && incoming().id == existing().id
+          && incoming().warehouseId == existing().warehouseId
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin() ||
+            (
+              existing().ownerId == request.auth.uid &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['barcode', 'sku', 'nama', 'kategori', 'lok', 'qty', 'updatedAt'])
+            )
+          );
+        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(itemId) && (existing().ownerId == request.auth.uid || isAdmin());
+      }
+
+      match /transactions/{txId} {
+        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(txId) && (existing().ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
+          && isValidId(warehouseId)
+          && isValidId(txId)
+          && isWarehouseOwner(warehouseId)
+          && isValidTransaction(incoming(), warehouseId, txId)
+          && incoming().ownerId == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerified() && allowsAssignedWarehouse(warehouseId)
+          && isValidId(warehouseId)
+          && isValidId(txId)
+          && isValidTransaction(incoming(), warehouseId, txId)
+          && incoming().id == existing().id
+          && incoming().warehouseId == existing().warehouseId
+          && incoming().ownerId == existing().ownerId
+          && incoming().txType == existing().txType
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin() ||
+            (
+              existing().ownerId == request.auth.uid &&
+              existing().ancanthoDone == false &&
+              (
+                incoming().diff(existing()).affectedKeys().hasOnly(['by', 'tgl', 'supplier', 'driver', 'noPlat', 'noDoc', 'pairId', 'partnerWhId', 'barcode', 'sku', 'nama', 'lok', 'dari', 'ke', 'exp', 'qty', 'ket', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['inboundQty', 'ancanthoDone', 'ancanthoBy', 'ancanthoKet', 'ancanthoAt', 'updatedAt'])
+              )
+            )
+          );
+        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(txId) && (existing().ownerId == request.auth.uid || isAdmin());
+      }
+
+      match /batches/{batchId} {
+        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(batchId) && (existing().ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
+          && isValidId(warehouseId)
+          && isValidId(batchId)
+          && isWarehouseOwner(warehouseId)
+          && isValidBatch(incoming(), warehouseId, batchId)
+          && incoming().ownerId == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerified() && allowsAssignedWarehouse(warehouseId)
+          && isValidId(warehouseId)
+          && isValidId(batchId)
+          && isValidBatch(incoming(), warehouseId, batchId)
+          && incoming().id == existing().id
+          && incoming().warehouseId == existing().warehouseId
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin() ||
+            (
+              existing().ownerId == request.auth.uid &&
+              existing().status != 'SELESAI' &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['tglMasuk', 'lok', 'barcode', 'sku', 'nama', 'batch', 'exp', 'qty', 'status', 'ket', 'by', 'updatedAt'])
+            )
+          );
+        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(batchId) && (existing().ownerId == request.auth.uid || isAdmin());
+      }
+
+      match /defects/{defectId} {
+        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(defectId) && (existing().ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
+          && isValidId(warehouseId)
+          && isValidId(defectId)
+          && isWarehouseOwner(warehouseId)
+          && isValidDefect(incoming(), warehouseId, defectId)
+          && incoming().ownerId == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerified() && allowsAssignedWarehouse(warehouseId)
+          && isValidId(warehouseId)
+          && isValidId(defectId)
+          && isValidDefect(incoming(), warehouseId, defectId)
+          && incoming().id == existing().id
+          && incoming().warehouseId == existing().warehouseId
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin() ||
+            (
+              existing().ownerId == request.auth.uid &&
+              existing().status in ['KARANTINA', 'REPACK'] &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'tindakLanjut', 'resolvedAt', 'ket', 'qty', 'sumber', 'batch', 'exp', 'potongStok', 'updatedAt'])
+            )
+          );
+        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(defectId) && (existing().ownerId == request.auth.uid || isAdmin());
+      }
+
+      match /cycleCounts/{sessionId} {
+        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(sessionId) && (existing().ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
+          && isValidId(warehouseId)
+          && isValidId(sessionId)
+          && isWarehouseOwner(warehouseId)
+          && isValidCycleSession(incoming(), warehouseId, sessionId)
+          && incoming().ownerId == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerified() && allowsAssignedWarehouse(warehouseId)
+          && isValidId(warehouseId)
+          && isValidId(sessionId)
+          && isValidCycleSession(incoming(), warehouseId, sessionId)
+          && incoming().id == existing().id
+          && incoming().warehouseId == existing().warehouseId
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin() ||
+            (
+              existing().ownerId == request.auth.uid &&
+              existing().status != 'SELESAI' &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['picAdmin', 'picField', 'status', 'notes', 'judul', 'blindCount', 'closedAt', 'updatedAt'])
+            )
+          );
+        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(sessionId) && (existing().ownerId == request.auth.uid || isAdmin());
+
+        match /lines/{lineId} {
+          allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(sessionId) && isValidId(lineId) && (existing().ownerId == request.auth.uid || isAdmin());
+          allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+          allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
+            && isValidId(warehouseId)
+            && isValidId(sessionId)
+            && isValidId(lineId)
+            && exists(/databases/$(database)/documents/warehouses/$(warehouseId)/cycleCounts/$(sessionId))
+            && get(/databases/$(database)/documents/warehouses/$(warehouseId)/cycleCounts/$(sessionId)).data.ownerId == request.auth.uid
+            && isValidCycleLine(incoming(), warehouseId, sessionId, lineId)
+            && incoming().ownerId == request.auth.uid
+            && incoming().createdAt == request.time
+            && incoming().updatedAt == request.time;
+          allow update: if isVerified() && allowsAssignedWarehouse(warehouseId)
+            && isValidId(warehouseId)
+            && isValidId(sessionId)
+            && isValidId(lineId)
+            && isValidCycleLine(incoming(), warehouseId, sessionId, lineId)
+            && incoming().id == existing().id
+            && incoming().warehouseId == existing().warehouseId
+            && incoming().sessionId == existing().sessionId
+            && incoming().ownerId == existing().ownerId
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time
+            && (
+              isAdmin() ||
+              (
+                existing().ownerId == request.auth.uid &&
+                existing().status != 'VERIFIED' &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['physQty', 'countedBy', 'countedAt', 'notes', 'status', 'kategori', 'assignedTo', 'updatedAt'])
+              )
+            );
+          allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(sessionId) && isValidId(lineId) && (existing().ownerId == request.auth.uid || isAdmin());
+        }
+      }
+
+      match /inboundRegister/{entryId} {
+        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(entryId) && (existing().ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
+          && isValidId(warehouseId)
+          && isValidId(entryId)
+          && isWarehouseOwner(warehouseId)
+          && isValidInboundEntry(incoming(), warehouseId, entryId)
+          && incoming().ownerId == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerified() && allowsAssignedWarehouse(warehouseId)
+          && isValidId(warehouseId)
+          && isValidId(entryId)
+          && isValidInboundEntry(incoming(), warehouseId, entryId)
+          && incoming().id == existing().id
+          && incoming().warehouseId == existing().warehouseId
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin() ||
+            (
+              existing().ownerId == request.auth.uid &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['tgl', 'supplier', 'driver', 'noPlat', 'noDoc', 'barcode', 'sku', 'nama', 'exp', 'qty', 'updatedAt'])
+            )
+          );
+        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(entryId) && (existing().ownerId == request.auth.uid || isAdmin());
+      }
+    }
+  }
+}

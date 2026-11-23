@@ -1,0 +1,10 @@
+{
+  "name": "Scarlett Warehouse",
+  "description": "System Inventory Warehouse",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,311 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated warehouse operator profile (public non-PII metadata).",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["stockkeeper", "admin", "super_admin", "owner"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "role", "createdAt", "updatedAt"]
+    },
+    "RoleAssignment": {
+      "title": "RoleAssignment",
+      "description": "Email-based role directory entry managed by Super Admin.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["stockkeeper", "admin", "super_admin"] },
+        "assignedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "warehouseId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "warehouseName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "displayName", "role", "assignedByUid", "createdAt", "updatedAt"]
+    },
+    "UserPrivateInfo": {
+      "title": "UserPrivateInfo",
+      "description": "Isolated PII document for authenticated user email.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 254 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "updatedAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Trusted administrator directory record.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 254 },
+        "grantedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "grantedAt"]
+    },
+    "Warehouse": {
+      "title": "Warehouse",
+      "description": "Warehouse configuration and stock thresholds.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "kode": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "nama": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "cutoff": { "type": "string", "maxLength": 32 },
+        "minStock": { "type": "number" },
+        "mode": { "type": "string", "enum": ["mutasi", "all"] },
+        "coverDays": { "type": "number" },
+        "expMonths": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "kode", "nama", "cutoff", "minStock", "mode", "coverDays", "expMonths", "createdAt", "updatedAt"]
+    },
+    "CatalogItem": {
+      "title": "CatalogItem",
+      "description": "Warehouse master SKU, location, opening balance, or all-stock entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "warehouseId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "kind": { "type": "string", "enum": ["master", "lokasi", "opening", "allstock"] },
+        "barcode": { "type": "string", "maxLength": 128 },
+        "sku": { "type": "string", "maxLength": 128 },
+        "nama": { "type": "string", "maxLength": 256 },
+        "kategori": { "type": "string", "maxLength": 128 },
+        "lok": { "type": "string", "maxLength": 128 },
+        "qty": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "warehouseId", "ownerId", "kind", "barcode", "sku", "nama", "kategori", "lok", "qty", "createdAt", "updatedAt"]
+    },
+    "WarehouseTransaction": {
+      "title": "WarehouseTransaction",
+      "description": "Inbound, outbound, transfer, or opname warehouse transaction with Admin Ancantho matching fields.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "warehouseId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "txType": { "type": "string", "enum": ["masuk", "keluar", "pindah", "opname"] },
+        "tgl": { "type": "string", "maxLength": 32 },
+        "barcode": { "type": "string", "maxLength": 128 },
+        "sku": { "type": "string", "maxLength": 128 },
+        "nama": { "type": "string", "maxLength": 256 },
+        "lok": { "type": "string", "maxLength": 128 },
+        "dari": { "type": "string", "maxLength": 128 },
+        "ke": { "type": "string", "maxLength": 128 },
+        "qty": { "type": "number" },
+        "inboundQty": { "type": "number" },
+        "sistem": { "type": "number" },
+        "fisik": { "type": "number" },
+        "selisih": { "type": "number" },
+        "exp": { "type": "string", "maxLength": 32 },
+        "batch": { "type": "string", "maxLength": 128 },
+        "ket": { "type": "string", "maxLength": 500 },
+        "by": { "type": "string", "maxLength": 120 },
+        "n": { "type": "number" },
+        "ancanthoDone": { "type": "boolean" },
+        "ancanthoBy": { "type": "string", "maxLength": 120 },
+        "ancanthoKet": { "type": "string", "maxLength": 500 },
+        "ancanthoAt": { "type": "string", "maxLength": 32 },
+        "supplier": { "type": "string", "maxLength": 128 },
+        "driver": { "type": "string", "maxLength": 128 },
+        "noPlat": { "type": "string", "maxLength": 128 },
+        "noDoc": { "type": "string", "maxLength": 128 },
+        "pairId": { "type": "string", "maxLength": 128 },
+        "partnerWhId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "warehouseId", "ownerId", "txType", "tgl", "barcode", "sku", "nama", "lok", "dari", "ke", "qty", "inboundQty", "sistem", "fisik", "selisih", "exp", "batch", "ket", "by", "n", "ancanthoDone", "ancanthoBy", "ancanthoKet", "ancanthoAt", "createdAt", "updatedAt"]
+    },
+    "ExpiryBatch": {
+      "title": "ExpiryBatch",
+      "description": "Batch expiry monitoring record (< 7 months alert tracking).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "warehouseId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "masukId": { "type": "string", "maxLength": 128 },
+        "tglMasuk": { "type": "string", "maxLength": 32 },
+        "lok": { "type": "string", "maxLength": 128 },
+        "barcode": { "type": "string", "maxLength": 128 },
+        "sku": { "type": "string", "maxLength": 128 },
+        "nama": { "type": "string", "maxLength": 256 },
+        "batch": { "type": "string", "maxLength": 128 },
+        "exp": { "type": "string", "maxLength": 32 },
+        "qty": { "type": "number" },
+        "status": { "type": "string", "enum": ["AKTIF", "KARANTINA", "SELESAI"] },
+        "ket": { "type": "string", "maxLength": 500 },
+        "by": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "warehouseId", "ownerId", "masukId", "tglMasuk", "lok", "barcode", "sku", "nama", "batch", "exp", "qty", "status", "ket", "by", "createdAt", "updatedAt"]
+    },
+    "DefectRecord": {
+      "title": "DefectRecord",
+      "description": "Quarantined damaged or expired defect product record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "warehouseId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tgl": { "type": "string", "maxLength": 32 },
+        "barcode": { "type": "string", "maxLength": 128 },
+        "sku": { "type": "string", "maxLength": 128 },
+        "nama": { "type": "string", "maxLength": 256 },
+        "lok": { "type": "string", "maxLength": 128 },
+        "kategori": { "type": "string", "maxLength": 128 },
+        "qty": { "type": "number" },
+        "ket": { "type": "string", "maxLength": 500 },
+        "by": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["KARANTINA", "RETUR", "MUSNAH", "REPACK"] },
+        "tindakLanjut": { "type": "string", "maxLength": 256 },
+        "resolvedAt": { "type": "string", "maxLength": 32 },
+        "sumber": { "type": "string", "maxLength": 64 },
+        "batch": { "type": "string", "maxLength": 128 },
+        "exp": { "type": "string", "maxLength": 32 },
+        "potongStok": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "warehouseId", "ownerId", "tgl", "barcode", "sku", "nama", "lok", "kategori", "qty", "ket", "by", "status", "tindakLanjut", "resolvedAt", "createdAt", "updatedAt"]
+    },
+    "CycleCountSession": {
+      "title": "CycleCountSession",
+      "description": "Daily cycle count session header.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "warehouseId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tgl": { "type": "string", "maxLength": 32 },
+        "picAdmin": { "type": "string", "maxLength": 120 },
+        "picField": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["OPEN", "SELESAI"] },
+        "notes": { "type": "string", "maxLength": 500 },
+        "judul": { "type": "string", "maxLength": 160 },
+        "blindCount": { "type": "boolean" },
+        "closedAt": { "type": "string", "maxLength": 32 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "warehouseId", "ownerId", "tgl", "picAdmin", "picField", "status", "notes", "createdAt", "updatedAt"]
+    },
+    "CycleCountLine": {
+      "title": "CycleCountLine",
+      "description": "Individual product count line inside a daily cycle count session.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "warehouseId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sku": { "type": "string", "maxLength": 128 },
+        "barcode": { "type": "string", "maxLength": 128 },
+        "nama": { "type": "string", "maxLength": 256 },
+        "lok": { "type": "string", "maxLength": 128 },
+        "kategori": { "type": "string", "maxLength": 128 },
+        "assignedTo": { "type": "string", "maxLength": 120 },
+        "sysQty": { "type": "number" },
+        "prevDiff": { "type": "number" },
+        "physQty": { "type": "number" },
+        "countedBy": { "type": "string", "maxLength": 120 },
+        "countedAt": { "type": "string", "maxLength": 32 },
+        "notes": { "type": "string", "maxLength": 500 },
+        "status": { "type": "string", "enum": ["PENDING", "COUNTED", "VERIFIED"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "warehouseId", "sessionId", "ownerId", "sku", "barcode", "nama", "lok", "sysQty", "prevDiff", "physQty", "countedBy", "countedAt", "notes", "status", "createdAt", "updatedAt"]
+    },
+    "InboundRegisterEntry": {
+      "title": "InboundRegisterEntry",
+      "description": "Surat Jalan inbound delivery note entry for a warehouse.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "warehouseId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tgl": { "type": "string", "maxLength": 32 },
+        "supplier": { "type": "string", "maxLength": 128 },
+        "driver": { "type": "string", "maxLength": 128 },
+        "noPlat": { "type": "string", "maxLength": 128 },
+        "noDoc": { "type": "string", "maxLength": 128 },
+        "barcode": { "type": "string", "maxLength": 128 },
+        "sku": { "type": "string", "maxLength": 128 },
+        "nama": { "type": "string", "maxLength": 256 },
+        "exp": { "type": "string", "maxLength": 32 },
+        "qty": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "warehouseId", "ownerId", "tgl", "supplier", "driver", "noPlat", "noDoc", "barcode", "sku", "nama", "exp", "qty", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profile metadata document (non-PII)."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateInfo" },
+      "description": "Isolated PII subcollection for user email."
+    },
+    "/admins/{adminUid}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Admin ACL records."
+    },
+    "/roleAssignments/{assignmentId}": {
+      "schema": { "$ref": "#/entities/RoleAssignment" },
+      "description": "Team Google email role assignments managed by Super Admin."
+    },
+    "/warehouses/{warehouseId}": {
+      "schema": { "$ref": "#/entities/Warehouse" },
+      "description": "Warehouse root records owned by authenticated operators."
+    },
+    "/warehouses/{warehouseId}/catalog/{itemId}": {
+      "schema": { "$ref": "#/entities/CatalogItem" },
+      "description": "Master SKU, locations, opening stock, and all-stock items for a warehouse."
+    },
+    "/warehouses/{warehouseId}/transactions/{txId}": {
+      "schema": { "$ref": "#/entities/WarehouseTransaction" },
+      "description": "Inbound, outbound, transfer, and opname transactions for a warehouse."
+    },
+    "/warehouses/{warehouseId}/batches/{batchId}": {
+      "schema": { "$ref": "#/entities/ExpiryBatch" },
+      "description": "Expiry batch tracking records for a warehouse."
+    },
+    "/warehouses/{warehouseId}/defects/{defectId}": {
+      "schema": { "$ref": "#/entities/DefectRecord" },
+      "description": "Quarantined defect records for a warehouse."
+    },
+    "/warehouses/{warehouseId}/cycleCounts/{sessionId}": {
+      "schema": { "$ref": "#/entities/CycleCountSession" },
+      "description": "Daily cycle count sessions for a warehouse."
+    },
+    "/warehouses/{warehouseId}/cycleCounts/{sessionId}/lines/{lineId}": {
+      "schema": { "$ref": "#/entities/CycleCountLine" },
+      "description": "Cycle count SKU lines inside a session."
+    },
+    "/warehouses/{warehouseId}/inboundRegister/{entryId}": {
+      "schema": { "$ref": "#/entities/InboundRegisterEntry" },
+      "description": "Surat Jalan inbound delivery note register for a warehouse."
+    }
+  }
+}
