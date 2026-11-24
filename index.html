@@ -2170,6 +2170,21 @@
     </div>
   </div>
 
+  <!-- Modal Input Bulk Barang Masuk / Keluar -->
+  <div id="bulk-tx-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="bulk-tx-title">
+    <div class="modal-box lg">
+      <div class="modal-head">
+        <h3 class="modal-title" id="bulk-tx-title">Input Bulk Transaksi</h3>
+        <button type="button" class="btn btn-sm" id="bulk-tx-close">Tutup</button>
+      </div>
+      <div class="modal-body" id="bulk-tx-body"></div>
+      <div class="modal-foot">
+        <button type="button" class="btn" id="bulk-tx-cancel">Batal</button>
+        <button type="button" class="btn btn-primary" id="bulk-tx-submit" disabled>Simpan Baris Valid</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast-wrap" id="toast-wrap" aria-live="polite"></div>
   <div id="cloud-root"></div>
 
@@ -4353,8 +4368,417 @@
         .map(function (line) { return line.trim(); })
         .filter(Boolean)
         .map(function (line) {
-          return line.indexOf('\t') >= 0 ? line.split('\t') : line.split(/[,;]/);
+          if (line.indexOf('\t') >= 0) return line.split('\t');
+          if (line.indexOf(';') >= 0 && line.indexOf(',') < 0) return line.split(';');
+          var out = [];
+          var cur = '';
+          var inQuotes = false;
+          for (var i = 0; i < line.length; i++) {
+            var ch = line[i];
+            if (ch === '"') {
+              if (inQuotes && line[i + 1] === '"') {
+                cur += '"';
+                i++;
+              } else {
+                inQuotes = !inQuotes;
+              }
+            } else if ((ch === ',' || ch === ';') && !inQuotes) {
+              out.push(cur.trim());
+              cur = '';
+            } else {
+              cur += ch;
+            }
+          }
+          out.push(cur.trim());
+          return out;
         });
+    }
+
+    // === EKSPOR DATABASE MULTI-SHEET EXCEL (.XLSX) & HELPER BATCH MASUK ===
+    function syncMasukBatchQty(dNow, row) {
+      if (!row || !row.exp) return;
+      dNow.batches = dNow.batches || [];
+      var bIdx = dNow.batches.findIndex(function (b) { return b.masukId === row.id; });
+      if (bIdx >= 0) {
+        dNow.batches[bIdx].qty = row.qty;
+        dNow.batches[bIdx].exp = row.exp;
+        dNow.batches[bIdx].lok = row.lok;
+        dNow.batches[bIdx].tglMasuk = row.tgl;
+        dNow.batches[bIdx].barcode = row.barcode;
+        dNow.batches[bIdx].sku = row.sku;
+        dNow.batches[bIdx].nama = row.nama;
+        dNow.batches[bIdx].by = row.by;
+      } else {
+        dNow.batches.push({
+          id: uid(),
+          masukId: row.id,
+          tglMasuk: row.tgl || todayISO(),
+          lok: row.lok,
+          barcode: row.barcode,
+          sku: row.sku,
+          nama: row.nama,
+          batch: row.batch || '',
+          exp: row.exp,
+          qty: row.qty,
+          status: 'AKTIF',
+          ket: row.ket || 'Dari Barang Masuk',
+          by: row.by
+        });
+      }
+    }
+
+    function normalizeExcelCell(val) {
+      if (val === null || val === undefined) return '';
+      if (typeof val === 'number') return isFinite(val) ? val : '';
+      if (typeof val === 'boolean') return val ? 'YA' : 'TIDAK';
+      return String(val);
+    }
+
+    function makeNeatWorksheet(headers, rows) {
+      var cleanRows = (rows || []).map(function (r) {
+        return headers.map(function (_, idx) {
+          return normalizeExcelCell(r[idx]);
+        });
+      });
+      var aoa = [headers].concat(cleanRows);
+      var ws = XLSX.utils.aoa_to_sheet(aoa);
+      var widths = headers.map(function (h) { return String(h || '').length; });
+      var scanLimit = Math.min(cleanRows.length, 3000);
+      for (var i = 0; i < scanLimit; i++) {
+        var row = cleanRows[i];
+        for (var c = 0; c < headers.length; c++) {
+          var len = String(row[c] == null ? '' : row[c]).length;
+          if (len > widths[c]) widths[c] = len;
+        }
+      }
+      ws['!cols'] = widths.map(function (w) {
+        return { wch: Math.min(48, Math.max(11, w + 3)) };
+      });
+      ws['!rows'] = [{ hpt: 22 }];
+      if (headers.length > 0 && aoa.length >= 1) {
+        ws['!autofilter'] = {
+          ref: XLSX.utils.encode_range({
+            s: { r: 0, c: 0 },
+            e: { r: Math.max(0, aoa.length - 1), c: headers.length - 1 }
+          })
+        };
+      }
+      return ws;
+    }
+
+    function appendNeatSheet(wb, usedNames, rawName, headers, rows) {
+      var base = String(rawName || 'Sheet').replace(/[:\\/?*\[\]]/g, '-').trim();
+      var name = (base || 'Sheet').slice(0, 31);
+      var n = 2;
+      while (usedNames[name]) {
+        var suffix = ' ' + n;
+        name = (base.slice(0, Math.max(1, 31 - suffix.length)) + suffix).slice(0, 31);
+        n++;
+      }
+      usedNames[name] = true;
+      XLSX.utils.book_append_sheet(wb, makeNeatWorksheet(headers, rows), name);
+    }
+
+    function exportAllDatabaseExcel() {
+      if (typeof XLSX === 'undefined') {
+        showToast('Pustaka Excel (SheetJS) belum termuat. Periksa koneksi lalu muat ulang halaman.', 'err');
+        return;
+      }
+      var role = getEffectiveRole();
+      var whList = (role === 'admin' || role === 'super_admin') ? W.list.slice() : getSelectableWarehouses(role);
+      if (!whList.length) whList = W.list.slice();
+
+      var ringkasanRows = [];
+      var stokAktifRows = [];
+      var masterRows = [];
+      var lokasiRows = [];
+      var stokAwalRows = [];
+      var masukRows = [];
+      var keluarRows = [];
+      var pindahRows = [];
+      var batchRows = [];
+      var defectRows = [];
+      var cycleRows = [];
+      var inboundRows = [];
+
+      whList.forEach(function (wMeta) {
+        var whName = wMeta.nama || wMeta.id;
+        var d = readWarehouseData(wMeta.id);
+        var an = computeWarehouseAnalysis(d);
+        var lookups = buildMasterLookups(d.master);
+        var expMonths = Number(d.expMonths || 7);
+
+        ringkasanRows.push([
+          wMeta.id,
+          whName,
+          d.cutoff || '',
+          d.mode === 'all' ? 'ALL STOCK + Baru (n:1)' : 'Mutasi Stok',
+          Number(d.min || 0),
+          Number(d.cover || 7),
+          expMonths,
+          Number(an.stats.skuAktif || 0),
+          Number(an.stats.totalPcs || 0),
+          (d.master || []).length,
+          (d.lokasi || []).length,
+          (d.opening || []).length + (d.allstock || []).length,
+          (d.masuk || []).length,
+          (d.keluar || []).length,
+          (d.pindah || []).length,
+          (d.batches || []).length,
+          (d.defect || []).length,
+          (d.cycleCounts || []).length,
+          (d.inboundRegister || []).length
+        ]);
+
+        an.rows.slice().sort(function (a, b) {
+          return String(a.lok || '').localeCompare(String(b.lok || '')) || String(a.sku || '').localeCompare(String(b.sku || ''));
+        }).forEach(function (r) {
+          var statusStok = r.qty < 0 ? 'Minus' : (r.qty === 0 ? 'Kosong' : (r.qty <= Number(d.min || 0) ? 'Menipis' : 'Aman'));
+          var eb = an.skuExpMap[normSku(r.sku)];
+          stokAktifRows.push([
+            whName,
+            r.lok || '',
+            r.barcode || '',
+            r.sku || '',
+            r.nama || '',
+            r.kategori || 'Lainnya',
+            Number(r.qty || 0),
+            statusStok,
+            eb ? (eb.exp || '') : '',
+            eb && eb.expInfo ? (eb.expInfo.label || '') : ''
+          ]);
+        });
+
+        (d.master || []).forEach(function (m) {
+          masterRows.push([
+            whName,
+            m.barcode || '',
+            m.sku || '',
+            m.nama || '',
+            inferProductCategory(m.nama, m.kategori)
+          ]);
+        });
+
+        (d.lokasi || []).forEach(function (lok) {
+          lokasiRows.push([whName, normLoc(lok)]);
+        });
+
+        (d.opening || []).forEach(function (o) {
+          stokAwalRows.push([whName, 'OPENING', o.lok || '', o.barcode || '', o.sku || '', o.nama || '', Number(o.qty || 0)]);
+        });
+        (d.allstock || []).forEach(function (a) {
+          stokAwalRows.push([whName, 'ALL STOCK', a.lok || '', a.barcode || '', a.sku || '', a.nama || '', Number(a.qty || 0)]);
+        });
+
+        (d.masuk || []).forEach(function (r) {
+          var isDone = isMasukAncanthoDone(r);
+          var im = getMasukInboundMatch(r);
+          masukRows.push([
+            whName,
+            r.tgl || '',
+            r.by || '',
+            r.barcode || '',
+            r.sku || '',
+            r.nama || '',
+            r.lok || '',
+            r.exp || '',
+            r.batch || '',
+            Number(r.qty || 0),
+            im.hasInbound ? Number(im.inboundQty || 0) : '',
+            im.hasInbound ? im.label : 'Belum Ada Inbound',
+            isDone ? 'Done' : 'Menunggu Admin',
+            r.ancanthoBy || '',
+            r.ancanthoAt || '',
+            r.ket || '',
+            r.ancanthoKet || ''
+          ]);
+        });
+
+        (d.keluar || []).forEach(function (r) {
+          var isDone = isMasukAncanthoDone(r);
+          var st = validateKeluarItem(r, d, an.stockMap, false);
+          keluarRows.push([
+            whName,
+            r.tgl || '',
+            r.by || '',
+            r.barcode || '',
+            r.sku || '',
+            r.nama || '',
+            r.lok || '',
+            r.exp || '',
+            Number(r.qty || 0),
+            st.text || '',
+            isDone ? 'Done Transfer' : 'Menunggu Admin',
+            r.ancanthoBy || '',
+            r.ancanthoAt || '',
+            r.ket || '',
+            r.ancanthoKet || ''
+          ]);
+        });
+
+        (d.pindah || []).forEach(function (r) {
+          pindahRows.push([
+            whName,
+            r.tgl || '',
+            r.by || '',
+            r.barcode || '',
+            r.sku || '',
+            r.nama || '',
+            r.dari || '',
+            r.ke || '',
+            Number(r.qty || 0),
+            r.exp || '',
+            r.ket || ''
+          ]);
+        });
+
+        (d.batches || []).forEach(function (b) {
+          var ei = b.exp ? classifyExpiry(b.exp, expMonths) : null;
+          batchRows.push([
+            whName,
+            b.tglMasuk || '',
+            b.lok || '',
+            b.barcode || '',
+            b.sku || '',
+            b.nama || '',
+            b.batch || '',
+            b.exp || '',
+            Number(b.qty || 0),
+            b.status || 'AKTIF',
+            ei ? ei.label : '',
+            b.by || '',
+            b.ket || ''
+          ]);
+        });
+
+        (d.defect || []).forEach(function (df) {
+          defectRows.push([
+            whName,
+            df.tgl || '',
+            df.lok || '',
+            df.barcode || '',
+            df.sku || '',
+            df.nama || '',
+            df.kategori || 'LAINNYA',
+            df.sumber || '',
+            Number(df.qty || 0),
+            df.status || 'KARANTINA',
+            df.by || '',
+            df.batch || '',
+            df.exp || '',
+            df.ket || ''
+          ]);
+        });
+
+        (d.cycleCounts || []).forEach(function (sess) {
+          var sm = computeCycleSessionMetrics(sess, d.cycleCounts);
+          var sessStatus = sm.pendingItems === 0 && sm.totalItems > 0 ? 'Selesai' : 'Berjalan';
+          (sm.rows || []).forEach(function (it) {
+            cycleRows.push([
+              whName,
+              sess.tgl || '',
+              sess.id || '',
+              sessStatus,
+              it.sku || '',
+              it.barcode || '',
+              it.nama || resolveProductCategory(it.sku, it.barcode, '', lookups) || '',
+              it.lok || '',
+              Number(it.stokWms || 0),
+              it.stokFisik === null ? '' : Number(it.stokFisik),
+              it.selisihHariIni === null ? '' : Number(it.selisihHariIni),
+              it.selisihSebelumnya === null ? '' : Number(it.selisihSebelumnya),
+              it.selisihTotal === null ? '' : Number(it.selisihTotal),
+              it.pic || sess.pic || '',
+              it.ket || ''
+            ]);
+          });
+        });
+
+        (d.inboundRegister || []).forEach(function (ib) {
+          inboundRows.push([
+            whName,
+            ib.tgl || '',
+            ib.supplier || '',
+            ib.driver || '',
+            ib.noPlat || '',
+            ib.noDoc || '',
+            ib.barcode || '',
+            ib.sku || '',
+            ib.nama || '',
+            ib.exp || '',
+            Number(ib.qty || 0)
+          ]);
+        });
+      });
+
+      var wb = XLSX.utils.book_new();
+      var usedNames = Object.create(null);
+
+      appendNeatSheet(wb, usedNames, 'Ringkasan Gudang', [
+        'ID Gudang', 'Nama Gudang', 'Tanggal Cutoff', 'Mode Stok', 'Batas Min (PCS)', 'Target Cover (Hari)',
+        'Batas Expire (Bln)', 'SKU Aktif', 'Total Stok Aktif (PCS)', 'Master Barang', 'Master Lokasi',
+        'Stok Awal', 'Barang Masuk', 'Barang Keluar', 'Perpindahan Lokasi', 'Batch & Expire',
+        'Defect & Karantina', 'Sesi Cycle Count', 'Surat Jalan Inbound'
+      ], ringkasanRows);
+
+      appendNeatSheet(wb, usedNames, 'Stok Aktif', [
+        'Nama Gudang', 'Lokasi', 'Barcode', 'SKU', 'Nama Produk', 'Kategori',
+        'Stok Aktif (PCS)', 'Status Stok', 'Expire Terdekat', 'Info Expire'
+      ], stokAktifRows);
+
+      appendNeatSheet(wb, usedNames, 'Master Barang', [
+        'Nama Gudang', 'Barcode', 'SKU', 'Nama Produk', 'Kategori'
+      ], masterRows);
+
+      appendNeatSheet(wb, usedNames, 'Master Lokasi', [
+        'Nama Gudang', 'Kode Lokasi'
+      ], lokasiRows);
+
+      appendNeatSheet(wb, usedNames, 'Stok Awal', [
+        'Nama Gudang', 'Sumber', 'Lokasi', 'Barcode', 'SKU', 'Nama Produk', 'Qty (PCS)'
+      ], stokAwalRows);
+
+      appendNeatSheet(wb, usedNames, 'Barang Masuk', [
+        'Nama Gudang', 'Tanggal', 'PIC Stockkeeper', 'Barcode', 'SKU', 'Nama Barang', 'Lokasi',
+        'Expiry Date', 'Batch', 'Qty Stockkeeper', 'Stock Inbound', 'Status Match',
+        'Status Ancantho', 'Admin Ancantho', 'Waktu Done', 'Keterangan Stockkeeper', 'Keterangan Admin'
+      ], masukRows);
+
+      appendNeatSheet(wb, usedNames, 'Barang Keluar', [
+        'Nama Gudang', 'Tanggal', 'PIC Stockkeeper', 'Barcode', 'SKU', 'Nama Barang', 'Lokasi',
+        'Expiry Date', 'Qty Keluar', 'Status Validasi', 'Status Ancantho',
+        'Admin Ancantho', 'Waktu Done', 'Keterangan', 'Keterangan Admin'
+      ], keluarRows);
+
+      appendNeatSheet(wb, usedNames, 'Perpindahan Lokasi', [
+        'Nama Gudang', 'Tanggal', 'PIC', 'Barcode', 'SKU', 'Nama Barang',
+        'Dari Lokasi', 'Ke Lokasi', 'Qty (PCS)', 'Expiry Date', 'Keterangan'
+      ], pindahRows);
+
+      appendNeatSheet(wb, usedNames, 'Batch & Expire', [
+        'Nama Gudang', 'Tanggal Masuk', 'Lokasi', 'Barcode', 'SKU', 'Nama Produk',
+        'Batch', 'Expiry Date', 'Qty (PCS)', 'Status', 'Info Expire', 'PIC', 'Keterangan'
+      ], batchRows);
+
+      appendNeatSheet(wb, usedNames, 'Defect & Karantina', [
+        'Nama Gudang', 'Tanggal', 'Lokasi', 'Barcode', 'SKU', 'Nama Produk',
+        'Jenis / Alasan', 'Sumber', 'Qty (PCS)', 'Status', 'PIC', 'Batch', 'Expiry Date', 'Keterangan'
+      ], defectRows);
+
+      appendNeatSheet(wb, usedNames, 'Cycle Count', [
+        'Nama Gudang', 'Tanggal Sesi', 'ID Sesi', 'Status Sesi', 'SKU', 'Barcode',
+        'Nama Produk', 'Lokasi', 'Stok WMS', 'Stok Fisik', 'Selisih Hari Ini',
+        'Selisih Sebelumnya', 'Selisih Total', 'PIC Hitung', 'Catatan'
+      ], cycleRows);
+
+      appendNeatSheet(wb, usedNames, 'Surat Jalan Inbound', [
+        'Nama Gudang', 'Tanggal', 'Supplier', 'Driver', 'No Plat', 'No Doc',
+        'Barcode', 'SKU', 'Nama Barang', 'Expired Date', 'Total Qty'
+      ], inboundRows);
+
+      var filename = 'Scarlett-Warehouse-Database-' + todayISO() + '.xlsx';
+      XLSX.writeFile(wb, filename);
+      showToast('Database Excel (.xlsx) diunduh: ' + whList.length + ' gudang, 12 sheet rapi', 'ok');
     }
 
     // === STATE UI, TEMA, TOAST & MODAL ===
@@ -4531,7 +4955,9 @@
       menu: '<line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/>',
       sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
       moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
-      autoTheme: '<circle cx="12" cy="12" r="9"/><path d="M12 3v18"/><path d="M12 8l5-3"/><path d="M12 13l5-3"/><path d="M12 18l5-3"/>'
+      autoTheme: '<circle cx="12" cy="12" r="9"/><path d="M12 3v18"/><path d="M12 8l5-3"/><path d="M12 13l5-3"/><path d="M12 18l5-3"/>',
+      download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+      table: '<rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="9" y1="10" x2="9" y2="20"/>'
     };
 
     function iconSvg(name, cls) {
@@ -5168,6 +5594,497 @@
       if (modal) modal.classList.remove('open');
     }
 
+    // === MODAL BULK BARANG MASUK & BULK BARANG KELUAR ===
+    var bulkTxSubmitCb = null;
+
+    function closeBulkTxModal() {
+      var modal = document.getElementById('bulk-tx-modal');
+      if (modal) modal.classList.remove('open');
+      bulkTxSubmitCb = null;
+    }
+
+    function openBulkTxModal(mode) {
+      var isMasuk = mode === 'masuk';
+      var d = curData();
+      var an = computeWarehouseAnalysis(d);
+      var whMeta = getWhMeta(W.cur);
+      var modal = document.getElementById('bulk-tx-modal');
+      var titleEl = document.getElementById('bulk-tx-title');
+      var bodyEl = document.getElementById('bulk-tx-body');
+      var submitBtn = document.getElementById('bulk-tx-submit');
+      if (!modal || !bodyEl || !submitBtn) return;
+
+      titleEl.textContent = (isMasuk ? 'Bulk Barang Masuk — ' : 'Bulk Barang Keluar — ') + whMeta.nama;
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Simpan Baris Valid';
+
+      var defaultPic = isMasuk
+        ? (masukStockkeeperName || W.user || '')
+        : (keluarStockkeeperName || masukStockkeeperName || W.user || '');
+      var locOpts = (d.lokasi || []).map(function (l) {
+        return '<option value="' + esc(l) + '">';
+      }).join('');
+
+      bodyEl.innerHTML =
+        '<p class="muted" style="margin:0 0 12px;font-size:13px">' +
+        (isMasuk
+          ? 'Upload file Excel (<code>.xlsx</code>/<code>.csv</code>) atau tempel banyak baris dari Excel / Google Sheets untuk mencatat <strong>Barang Masuk</strong> sekaligus ke stok &amp; antrean Ancantho.'
+          : 'Upload file Excel (<code>.xlsx</code>/<code>.csv</code>) atau tempel banyak baris dari Excel / Google Sheets untuk mencatat <strong>Barang Keluar</strong> sekaligus dengan pengecekan stok berjalan per lokasi.') +
+        '</p>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">' +
+        '<button type="button" class="btn btn-sm" id="bulk-download-tpl">' + iconSvg('download') + '<span>Unduh Template Excel (.xlsx)</span></button>' +
+        '<button type="button" class="btn btn-sm" id="bulk-upload-btn">' + iconSvg('master') + '<span>Upload File Excel / CSV</span></button>' +
+        '<input type="file" id="bulk-file-input" accept=".xlsx,.xls,.csv,.txt" style="display:none" />' +
+        '<button type="button" class="btn btn-sm" id="bulk-clear-btn">Bersihkan</button>' +
+        '</div>' +
+        '<div class="form-grid" style="margin-bottom:12px">' +
+        '<div class="field"><label for="bulk-def-tgl">Default Tanggal</label><input id="bulk-def-tgl" type="date" class="input" value="' + esc(todayISO()) + '" /></div>' +
+        '<div class="field"><label for="bulk-def-pic">Default PIC Stockkeeper</label><input id="bulk-def-pic" type="text" class="input" value="' + esc(defaultPic) + '" placeholder="Mis. Budi / Rina" /></div>' +
+        '<div class="field"><label for="bulk-def-lok">Default Lokasi (opsional)</label><input id="bulk-def-lok" type="text" class="input" list="dl-bulk-lokasi" placeholder="Jika kolom lokasi kosong" autocomplete="off" /></div>' +
+        (isMasuk
+          ? '<div class="field"><label for="bulk-def-exp">Default Expiry Date (opsional)</label><input id="bulk-def-exp" type="date" class="input" /></div>'
+          : '') +
+        '</div>' +
+        '<datalist id="dl-bulk-lokasi">' + locOpts + '</datalist>' +
+        '<div class="field" style="margin-bottom:12px">' +
+        '<label for="bulk-paste-area">Tempel Tabel (Format standar 9 kolom: <code>Tanggal | PIC | Barcode | SKU | Nama Barang | Lokasi | Expiry Date | Qty | Keterangan</code> atau ringkas <code>Barcode/SKU | Lokasi | Expiry | Qty | Ket</code>)</label>' +
+        '<textarea id="bulk-paste-area" class="input mono" rows="6" placeholder="' + (isMasuk
+          ? '2026-11-24\tBudi\t8997236030012\t5000011\tScarlett Romansa\tRAK-A1\t2027-08-31\t24\tInbound batch 1'
+          : '2026-11-24\tSari\t8997236030012\t5000011\tScarlett Romansa\tRAK-A1\t2027-08-31\t12\tOrder marketplace') + '"></textarea>' +
+        '</div>' +
+        '<div id="bulk-preview-summary" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"></div>' +
+        '<div class="table-wrap" style="max-height:260px"><table><thead><tr>' +
+        '<th>#</th><th>Tanggal</th><th>PIC</th><th>Barcode / SKU</th><th>Nama Produk</th><th>Lokasi</th><th>Expiry Date</th><th class="right">Qty</th><th>Validasi</th>' +
+        '</tr></thead><tbody id="bulk-preview-rows">' +
+        '<tr><td colspan="9" class="muted" style="text-align:center;padding:18px">Tempel data atau upload file Excel/CSV untuk melihat pratinjau validasi.</td></tr>' +
+        '</tbody></table></div>';
+
+      var pasteEl = document.getElementById('bulk-paste-area');
+      var defTglEl = document.getElementById('bulk-def-tgl');
+      var defPicEl = document.getElementById('bulk-def-pic');
+      var defLokEl = document.getElementById('bulk-def-lok');
+      var defExpEl = document.getElementById('bulk-def-exp');
+      var summaryEl = document.getElementById('bulk-preview-summary');
+      var tbodyEl = document.getElementById('bulk-preview-rows');
+      var fileInp = document.getElementById('bulk-file-input');
+
+      var parsedValidRows = [];
+
+      function resolveBulkProduct(bcRaw, skuRaw, namaRaw) {
+        var bc = normBarcode(bcRaw);
+        var sku = normSku(skuRaw);
+        var nama = String(namaRaw || '').trim();
+        var mf = (bc && (findMasterByBarcode(d.master, bc) || findMasterBySku(d.master, bc))) ||
+                 (sku && (findMasterBySku(d.master, sku) || findMasterByBarcode(d.master, sku)));
+        if (mf) {
+          if (!bc) bc = normBarcode(mf.barcode);
+          if (!sku) sku = normSku(mf.sku);
+          if (!nama) nama = String(mf.nama || '').trim();
+        } else {
+          var stk = an.rows.find(function (r) {
+            return (bc && (normBarcode(r.barcode) === bc || normSku(r.sku) === normSku(bc))) ||
+                   (sku && normSku(r.sku) === sku);
+          });
+          if (stk) {
+            if (!bc) bc = normBarcode(stk.barcode);
+            if (!sku) sku = normSku(stk.sku);
+            if (!nama) nama = String(stk.nama || '').trim();
+          }
+        }
+        if (!sku && bc) sku = normSku(bc);
+        if (!bc && sku) bc = normBarcode(sku);
+        return { barcode: bc, sku: sku, nama: nama };
+      }
+
+      function detectBulkColMap(headerRow) {
+        var cols = {};
+        var hits = 0;
+        for (var c = 0; c < headerRow.length; c++) {
+          var h = String(headerRow[c] || '').trim().toUpperCase();
+          if (!h) continue;
+          if (/EXP|KADALUWARSA|\bED\b/.test(h)) { if (cols.exp == null) { cols.exp = c; hits++; } }
+          else if (/TANGGAL|TGL|DATE/.test(h) && cols.tgl == null) { cols.tgl = c; hits++; }
+          else if (/BARCODE|EAN|UPC/.test(h) && cols.barcode == null) { cols.barcode = c; hits++; }
+          else if (/\bSKU\b|KODE/.test(h) && cols.sku == null) { cols.sku = c; hits++; }
+          else if (/NAMA|PRODUK|ITEM|DESC/.test(h) && cols.nama == null) { cols.nama = c; hits++; }
+          else if (/LOKASI|LOK\b|RAK|LOC/.test(h) && cols.lok == null) { cols.lok = c; hits++; }
+          else if (/QTY|JUMLAH|JML|PCS/.test(h) && cols.qty == null) { cols.qty = c; hits++; }
+          else if (/PIC|PETUGAS|STOCKKEEPER|OPERATOR|\bBY\b/.test(h) && cols.by == null) { cols.by = c; hits++; }
+          else if (/KET|CATATAN|NOTE|REMARK/.test(h) && cols.ket == null) { cols.ket = c; }
+        }
+        return hits >= 2 ? cols : null;
+      }
+
+      function extractRowByHeuristic(colsArr) {
+        var n = colsArr.length;
+        if (n >= 8) {
+          return {
+            tgl: colsArr[0], by: colsArr[1], barcode: colsArr[2], sku: colsArr[3],
+            nama: colsArr[4], lok: colsArr[5], exp: colsArr[6], qty: colsArr[7],
+            ket: colsArr[8] || ''
+          };
+        }
+        if (n === 7) {
+          if (parseDate(colsArr[0])) {
+            return { tgl: colsArr[0], by: colsArr[1], barcode: colsArr[2], sku: '', nama: '', lok: colsArr[3], exp: colsArr[4], qty: colsArr[5], ket: colsArr[6] };
+          }
+          return { tgl: '', by: colsArr[0], barcode: colsArr[1], sku: colsArr[2], nama: colsArr[3], lok: colsArr[4], exp: colsArr[5], qty: colsArr[6], ket: '' };
+        }
+        if (n === 6) {
+          if (parseDate(colsArr[0])) {
+            return { tgl: colsArr[0], by: '', barcode: colsArr[1], sku: colsArr[2], nama: colsArr[3], lok: colsArr[4], exp: '', qty: colsArr[5], ket: '' };
+          }
+          return { tgl: '', by: '', barcode: colsArr[0], sku: colsArr[1], nama: colsArr[2], lok: colsArr[3], exp: colsArr[4], qty: colsArr[5], ket: '' };
+        }
+        if (n === 5) {
+          if (parseDate(colsArr[0])) {
+            if (parseExpDate(colsArr[3])) {
+              return { tgl: colsArr[0], by: '', barcode: colsArr[1], sku: '', nama: '', lok: colsArr[2], exp: colsArr[3], qty: colsArr[4], ket: '' };
+            }
+            return { tgl: colsArr[0], by: '', barcode: colsArr[1], sku: '', nama: '', lok: colsArr[2], exp: '', qty: colsArr[3], ket: colsArr[4] };
+          }
+          return { tgl: '', by: '', barcode: colsArr[0], sku: '', nama: '', lok: colsArr[1], exp: colsArr[2], qty: colsArr[3], ket: colsArr[4] };
+        }
+        if (n === 4) {
+          if (parseDate(colsArr[0])) {
+            return { tgl: colsArr[0], by: '', barcode: colsArr[1], sku: '', nama: '', lok: colsArr[2], exp: '', qty: colsArr[3], ket: '' };
+          }
+          if (parseExpDate(colsArr[2])) {
+            return { tgl: '', by: '', barcode: colsArr[0], sku: '', nama: '', lok: colsArr[1], exp: colsArr[2], qty: colsArr[3], ket: '' };
+          }
+          return { tgl: '', by: '', barcode: colsArr[0], sku: '', nama: '', lok: colsArr[1], exp: '', qty: colsArr[2], ket: colsArr[3] };
+        }
+        return { tgl: '', by: '', barcode: colsArr[0] || '', sku: '', nama: '', lok: colsArr[1] || '', exp: '', qty: colsArr[2] || '', ket: '' };
+      }
+
+      function recomputeBulkPreview() {
+        var grid = parseDelimitedLines(pasteEl.value);
+        parsedValidRows = [];
+        if (!grid.length) {
+          summaryEl.innerHTML = '';
+          tbodyEl.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;padding:18px">Tempel data atau upload file Excel/CSV untuk melihat pratinjau validasi.</td></tr>';
+          submitBtn.disabled = true;
+          submitBtn.textContent = 'Simpan Baris Valid';
+          return;
+        }
+
+        var defTgl = parseDate(defTglEl.value) || todayISO();
+        var defPic = String(defPicEl.value || '').trim();
+        var defLok = normLoc(defLokEl.value);
+        var defExp = defExpEl ? parseExpDate(defExpEl.value) : '';
+
+        var colMap = detectBulkColMap(grid[0]);
+        var startIdx = colMap ? 1 : 0;
+
+        // Clone running stock map untuk simulasi stok berjalan pada Bulk Keluar
+        var simStockMap = Object.create(null);
+        if (!isMasuk) {
+          Object.keys(an.stockMap).forEach(function (k) {
+            simStockMap[k] = Object.assign({}, an.stockMap[k]);
+          });
+        }
+
+        var previewList = [];
+        var validCount = 0;
+        var errCount = 0;
+
+        for (var i = startIdx; i < grid.length; i++) {
+          var colsArr = grid[i];
+          if (!colsArr || !colsArr.some(function (c) { return String(c || '').trim() !== ''; })) continue;
+
+          var raw = colMap ? {
+            tgl: colMap.tgl != null ? colsArr[colMap.tgl] : '',
+            by: colMap.by != null ? colsArr[colMap.by] : '',
+            barcode: colMap.barcode != null ? colsArr[colMap.barcode] : '',
+            sku: colMap.sku != null ? colsArr[colMap.sku] : '',
+            nama: colMap.nama != null ? colsArr[colMap.nama] : '',
+            lok: colMap.lok != null ? colsArr[colMap.lok] : '',
+            exp: colMap.exp != null ? colsArr[colMap.exp] : '',
+            qty: colMap.qty != null ? colsArr[colMap.qty] : '',
+            ket: colMap.ket != null ? colsArr[colMap.ket] : ''
+          } : extractRowByHeuristic(colsArr);
+
+          var tgl = parseDate(raw.tgl) || defTgl;
+          var by = String(raw.by || '').trim() || defPic;
+          var resolved = resolveBulkProduct(raw.barcode, raw.sku, raw.nama);
+          var lok = normLoc(raw.lok) || defLok;
+          var exp = parseExpDate(raw.exp) || defExp;
+          var qty = parseQty(raw.qty);
+          var ket = String(raw.ket || '').trim();
+
+          var issues = [];
+          var warnNote = '';
+
+          if (!tgl) issues.push('Tanggal tidak valid');
+          if (!by) issues.push('PIC wajib diisi');
+          if (!resolved.barcode && !resolved.sku) issues.push('Barcode / SKU kosong');
+          if (!lok) issues.push('Lokasi wajib diisi');
+          if (!(qty > 0)) issues.push('Qty harus > 0');
+
+          if (isMasuk) {
+            if (!resolved.nama) issues.push('Nama barang belum ditemukan di Master');
+            if (!exp) issues.push('Expiry Date wajib diisi');
+            else if (classifyExpiry(exp, Number(d.expMonths || 7)).isAlert) {
+              warnNote = classifyExpiry(exp, Number(d.expMonths || 7)).label;
+            }
+          } else {
+            if (!exp && lok && resolved.sku) {
+              var matchBatch = (an.batchRows || []).filter(function (b) {
+                return normLoc(b.lok) === lok && normSku(b.sku) === resolved.sku && b.qty > 0 && b.exp &&
+                  (!resolved.barcode || normBarcode(b.barcode) === resolved.barcode);
+              }).sort(function (a, b) { return String(a.exp).localeCompare(String(b.exp)); })[0];
+              if (matchBatch) exp = matchBatch.exp;
+            }
+            if (!issues.length) {
+              var chk = validateKeluarItem({ tgl: tgl, lok: lok, sku: resolved.sku, barcode: resolved.barcode, qty: qty }, d, simStockMap, true);
+              if (!chk.ok) {
+                issues.push(chk.text.replace(/^[^\w]+/, '').trim());
+              } else {
+                var skKey = stockKey(lok, resolved.sku, resolved.barcode);
+                if (simStockMap[skKey] && !chk.historical) {
+                  simStockMap[skKey].qty = Number(simStockMap[skKey].qty || 0) - qty;
+                }
+              }
+            }
+          }
+
+          var ok = issues.length === 0;
+          if (ok) {
+            validCount++;
+            parsedValidRows.push({
+              tgl: tgl,
+              by: by,
+              barcode: resolved.barcode,
+              sku: resolved.sku,
+              nama: resolved.nama || resolved.sku,
+              lok: lok,
+              exp: exp,
+              qty: qty,
+              ket: ket
+            });
+          } else {
+            errCount++;
+          }
+
+          previewList.push({
+            idx: previewList.length + 1,
+            tgl: tgl,
+            by: by,
+            barcode: resolved.barcode,
+            sku: resolved.sku,
+            nama: resolved.nama,
+            lok: lok,
+            exp: exp,
+            qty: qty,
+            ok: ok,
+            issues: issues,
+            warnNote: warnNote
+          });
+        }
+
+        summaryEl.innerHTML =
+          '<span class="badge badge-neutral">Total: ' + previewList.length + ' baris</span>' +
+          '<span class="badge badge-ok">Siap Simpan: ' + validCount + '</span>' +
+          (errCount > 0 ? '<span class="badge badge-err">Perlu Perbaiki: ' + errCount + '</span>' : '');
+
+        if (!previewList.length) {
+          tbodyEl.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;padding:18px">Tidak ada baris data yang dapat dibaca.</td></tr>';
+        } else {
+          tbodyEl.innerHTML = previewList.slice(0, 150).map(function (r) {
+            return '<tr>' +
+              '<td class="num">' + r.idx + '</td>' +
+              '<td class="num">' + esc(r.tgl || '-') + '</td>' +
+              '<td>' + esc(r.by || '-') + '</td>' +
+              '<td class="mono">' + esc(r.barcode || r.sku || '-') + (r.sku && r.barcode && r.sku !== r.barcode ? ' / ' + esc(r.sku) : '') + '</td>' +
+              '<td>' + esc(r.nama || '-') + '</td>' +
+              '<td>' + (r.lok ? '<span class="masuk-loc-pill">' + esc(r.lok) + '</span>' : '-') + '</td>' +
+              '<td class="num">' + esc(r.exp || '-') + '</td>' +
+              '<td class="right num"><strong>' + (r.qty > 0 ? ((isMasuk ? '+' : '-') + fmtNum(r.qty)) : '0') + '</strong></td>' +
+              '<td>' + (r.ok
+                ? ('<span class="badge badge-ok">✓ Siap</span>' + (r.warnNote ? ' <span class="badge badge-warn">' + esc(r.warnNote) + '</span>' : ''))
+                : ('<span class="badge badge-err">' + esc(r.issues.join(' · ')) + '</span>')) + '</td>' +
+              '</tr>';
+          }).join('') + (previewList.length > 150
+            ? '<tr><td colspan="9" class="muted" style="text-align:center">Menampilkan 150 dari ' + previewList.length + ' baris. Semua baris valid tetap akan disimpan.</td></tr>'
+            : '');
+        }
+
+        submitBtn.disabled = validCount === 0;
+        submitBtn.textContent = validCount > 0 ? ('Simpan ' + validCount + ' Baris Valid') : 'Simpan Baris Valid';
+      }
+
+      document.getElementById('bulk-download-tpl').addEventListener('click', function () {
+        if (typeof XLSX === 'undefined') {
+          showToast('Pustaka Excel (SheetJS) belum termuat.', 'err');
+          return;
+        }
+        var sampleMaster = (d.master && d.master[0]) || { barcode: '8997236030012', sku: '5000011', nama: 'Scarlett Body Lotion Romansa' };
+        var sampleLoc = (d.lokasi && d.lokasi[0]) || 'RAK-A1';
+        if (!isMasuk) {
+          var activeSample = an.rows.find(function (r) { return r.qty > 0; });
+          if (activeSample) {
+            sampleMaster = activeSample;
+            sampleLoc = activeSample.lok || sampleLoc;
+          }
+        }
+        var tplRows = [
+          [todayISO(), defaultPic || 'Budi', sampleMaster.barcode || '', sampleMaster.sku || '', sampleMaster.nama || '', sampleLoc, '2027-08-31', 12, isMasuk ? 'Contoh bulk masuk' : 'Contoh bulk keluar']
+        ];
+        var wbTpl = XLSX.utils.book_new();
+        var usedTpl = Object.create(null);
+        appendNeatSheet(wbTpl, usedTpl, isMasuk ? 'Template Bulk Masuk' : 'Template Bulk Keluar', [
+          'Tanggal', 'PIC Stockkeeper', 'Barcode', 'SKU', 'Nama Barang', 'Lokasi', 'Expiry Date', 'Qty', 'Keterangan'
+        ], tplRows);
+        XLSX.writeFile(wbTpl, isMasuk ? 'Template-Bulk-Barang-Masuk.xlsx' : 'Template-Bulk-Barang-Keluar.xlsx');
+        showToast('Template Excel (.xlsx) diunduh', 'ok');
+      });
+
+      document.getElementById('bulk-upload-btn').addEventListener('click', function () {
+        fileInp.value = '';
+        fileInp.click();
+      });
+
+      fileInp.addEventListener('change', function () {
+        var f = fileInp.files && fileInp.files[0];
+        if (!f) return;
+        var ext = String(f.name || '').toLowerCase();
+        if (ext.endsWith('.csv') || ext.endsWith('.txt')) {
+          var txtReader = new FileReader();
+          txtReader.onload = function (ev) {
+            pasteEl.value = String(ev.target.result || '');
+            recomputeBulkPreview();
+            showToast('File ' + f.name + ' dimuat ke pratinjau', 'ok');
+          };
+          txtReader.readAsText(f);
+          return;
+        }
+        if (typeof XLSX === 'undefined') {
+          showToast('Pustaka Excel (SheetJS) belum termuat. Gunakan upload CSV atau tempel tabel.', 'err');
+          return;
+        }
+        var binReader = new FileReader();
+        binReader.onload = function (ev) {
+          try {
+            var wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
+            var targetSheet = findSheet(wb, isMasuk ? 'Barang Masuk' : 'Barang Keluar') ||
+              findSheet(wb, isMasuk ? 'Template Bulk Masuk' : 'Template Bulk Keluar') ||
+              wb.Sheets[wb.SheetNames[0]];
+            var aoa = sheetToAoA(targetSheet);
+            var hIdx = -1;
+            for (var r = 0; r < Math.min(8, aoa.length); r++) {
+              if (detectBulkColMap(aoa[r] || [])) { hIdx = r; break; }
+            }
+            var lines = [];
+            var colCheck = hIdx >= 0 ? detectBulkColMap(aoa[hIdx] || []) : null;
+            for (var rIdx = Math.max(0, hIdx); rIdx < aoa.length; rIdx++) {
+              var rowArr = aoa[rIdx] || [];
+              if (!rowArr.some(function (cell) { return String(cell == null ? '' : cell).trim() !== ''; })) continue;
+              lines.push(rowArr.map(function (cell, cIdx) {
+                if (colCheck && rIdx > hIdx) {
+                  if (colCheck.tgl === cIdx) {
+                    var pd = parseDate(cell);
+                    if (pd) return pd;
+                  }
+                  if (colCheck.exp === cIdx) {
+                    var pe = parseExpDate(cell);
+                    if (pe) return pe;
+                  }
+                }
+                return String(cell == null ? '' : cell).replace(/[\t\r\n]+/g, ' ').trim();
+              }).join('\t'));
+            }
+            pasteEl.value = lines.join('\n');
+            recomputeBulkPreview();
+            showToast('File Excel ' + f.name + ' berhasil dibaca', 'ok');
+          } catch (err) {
+            showToast('Gagal membaca file Excel: ' + (err.message || 'format tidak valid'), 'err');
+          }
+        };
+        binReader.readAsArrayBuffer(f);
+      });
+
+      document.getElementById('bulk-clear-btn').addEventListener('click', function () {
+        pasteEl.value = '';
+        recomputeBulkPreview();
+        pasteEl.focus();
+      });
+
+      pasteEl.addEventListener('input', recomputeBulkPreview);
+      defTglEl.addEventListener('change', recomputeBulkPreview);
+      defPicEl.addEventListener('input', recomputeBulkPreview);
+      defLokEl.addEventListener('input', recomputeBulkPreview);
+      if (defExpEl) defExpEl.addEventListener('change', recomputeBulkPreview);
+
+      bulkTxSubmitCb = function () {
+        if (!parsedValidRows.length) {
+          showToast('Belum ada baris valid untuk disimpan', 'warn');
+          return;
+        }
+        var dNow = curData();
+        var latestPic = '';
+        parsedValidRows.forEach(function (item) {
+          latestPic = item.by || latestPic;
+          var rowId = uid();
+          if (isMasuk) {
+            var newMasuk = {
+              id: rowId,
+              tgl: item.tgl,
+              barcode: item.barcode,
+              sku: item.sku,
+              nama: item.nama,
+              lok: item.lok,
+              qty: item.qty,
+              inboundQty: null,
+              batch: '',
+              exp: item.exp,
+              ket: item.ket || '',
+              by: item.by,
+              n: 1,
+              ancanthoDone: false,
+              ancanthoBy: '',
+              ancanthoKet: '',
+              ancanthoAt: ''
+            };
+            dNow.masuk.push(newMasuk);
+            if (item.exp) syncMasukBatchQty(dNow, newMasuk);
+          } else {
+            dNow.keluar.push({
+              id: rowId,
+              tgl: item.tgl,
+              barcode: item.barcode,
+              sku: item.sku,
+              nama: item.nama,
+              lok: item.lok,
+              qty: item.qty,
+              exp: item.exp || '',
+              ket: item.ket || '',
+              by: item.by,
+              n: 1,
+              ancanthoDone: false,
+              ancanthoBy: '',
+              ancanthoKet: '',
+              ancanthoAt: ''
+            });
+          }
+        });
+
+        if (latestPic) {
+          if (isMasuk) masukStockkeeperName = latestPic;
+          else keluarStockkeeperName = latestPic;
+          W.user = latestPic;
+          saveRegistry();
+        }
+        writeWarehouseData(W.cur, dNow);
+        playBeep(true);
+        showToast('Berhasil menyimpan ' + parsedValidRows.length + ' baris Bulk ' + (isMasuk ? 'Barang Masuk' : 'Barang Keluar'), 'ok');
+        closeBulkTxModal();
+        renderApp();
+      };
+
+      modal.classList.add('open');
+      setTimeout(function () { pasteEl.focus(); }, 30);
+    }
+
     async function refreshPinStatus() {
       if (!window.__sgpCloud || !window.__sgpCloud.pinAuth) return pinStatusCache;
       try {
@@ -5493,7 +6410,10 @@
       var html = pageHeaderHtml(
         'Dashboard — ' + getWhMeta(W.cur).nama,
         'Fokus operasional harian: Barang Masuk, Antrean Inbound Matching, Barang Keluar, dan Perpindahan Barang.',
-        hasData ? '<button type="button" class="btn btn-wa" id="dash-wa-btn">' + iconSvg('whatsapp') + '<span>Laporan Harian WA</span></button>' : ''
+        '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+        '<button type="button" class="btn btn-sm" id="dash-export-xlsx-btn">' + iconSvg('download') + '<span>Download Excel</span></button>' +
+        (hasData ? '<button type="button" class="btn btn-wa btn-sm" id="dash-wa-btn">' + iconSvg('whatsapp') + '<span>Laporan Harian WA</span></button>' : '') +
+        '</div>'
       );
 
       var dashboardRole = getEffectiveRole();
@@ -5695,6 +6615,8 @@
           buildDailyWhatsappReport(curData(), computeWarehouseAnalysis(curData()))
         );
       }
+      var dashExportBtn = document.getElementById('dash-export-xlsx-btn');
+      if (dashExportBtn) dashExportBtn.addEventListener('click', exportAllDatabaseExcel);
       var dashWaBtn = document.getElementById('dash-wa-btn');
       var dashWaTile = document.getElementById('dash-wa-tile');
       if (dashWaBtn) dashWaBtn.addEventListener('click', openDashWhatsapp);
@@ -5778,7 +6700,10 @@
       var allMasuk = (d.masuk || []).slice().reverse();
       var isSkRole = getEffectiveRole() === 'stockkeeper';
 
-      var headerActions = '<button type="button" class="btn btn-wa btn-sm" id="masuk-wa-btn">' + iconSvg('whatsapp') + '<span>Slip WA</span></button>';
+      var headerActions = '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+        '<button type="button" class="btn btn-primary btn-sm" id="open-bulk-masuk-btn">' + iconSvg('table') + '<span>Bulk Masuk</span></button>' +
+        '<button type="button" class="btn btn-wa btn-sm" id="masuk-wa-btn">' + iconSvg('whatsapp') + '<span>Slip WA</span></button>' +
+        '</div>';
 
       var html = pageHeaderHtml(
         'Barang Masuk',
@@ -5929,38 +6854,6 @@
       checkInputExpiry();
       expEl.addEventListener('input', checkInputExpiry);
       bcEl.addEventListener('input', lookupBarcode);
-
-      function syncMasukBatchQty(dNow, row) {
-        if (!row || !row.exp) return;
-        dNow.batches = dNow.batches || [];
-        var bIdx = dNow.batches.findIndex(function (b) { return b.masukId === row.id; });
-        if (bIdx >= 0) {
-          dNow.batches[bIdx].qty = row.qty;
-          dNow.batches[bIdx].exp = row.exp;
-          dNow.batches[bIdx].lok = row.lok;
-          dNow.batches[bIdx].tglMasuk = row.tgl;
-          dNow.batches[bIdx].barcode = row.barcode;
-          dNow.batches[bIdx].sku = row.sku;
-          dNow.batches[bIdx].nama = row.nama;
-          dNow.batches[bIdx].by = row.by;
-        } else {
-          dNow.batches.push({
-            id: uid(),
-            masukId: row.id,
-            tglMasuk: row.tgl || todayISO(),
-            lok: row.lok,
-            barcode: row.barcode,
-            sku: row.sku,
-            nama: row.nama,
-            batch: '',
-            exp: row.exp,
-            qty: row.qty,
-            status: 'AKTIF',
-            ket: 'Dari Barang Masuk',
-            by: row.by
-          });
-        }
-      }
 
       function handleBarcodeScanComplete() {
         var product = lookupBarcode();
@@ -6116,6 +7009,13 @@
           removeTxSafely('masuk', id);
         });
       });
+
+      var bulkMasukBtn = document.getElementById('open-bulk-masuk-btn');
+      if (bulkMasukBtn) {
+        bulkMasukBtn.addEventListener('click', function () {
+          openBulkTxModal('masuk');
+        });
+      }
 
       var waBtn = document.getElementById('masuk-wa-btn');
       if (waBtn) {
@@ -6821,6 +7721,7 @@
           '<button type="button" class="seg-btn' + (keluarRole === 'admin' ? ' active' : '') + '" data-keluar-role="admin">Admin Ancantho' + (pendingCount > 0 ? ' (' + pendingCount + ')' : '') + '</button>' +
           '</div>'
         )) +
+        '<button type="button" class="btn btn-primary btn-sm" id="open-bulk-keluar-btn">' + iconSvg('table') + '<span>Bulk Keluar</span></button>' +
         '<button type="button" class="btn btn-wa btn-sm" id="keluar-wa-btn">' + iconSvg('whatsapp') + '<span>Slip WA</span></button>' +
         '</div>';
 
@@ -7634,6 +8535,13 @@
           renderApp();
         });
       });
+
+      var bulkKeluarBtn = document.getElementById('open-bulk-keluar-btn');
+      if (bulkKeluarBtn) {
+        bulkKeluarBtn.addEventListener('click', function () {
+          openBulkTxModal('keluar');
+        });
+      }
 
       var keluarWaBtn = document.getElementById('keluar-wa-btn');
       if (keluarWaBtn) {
@@ -10289,6 +11197,7 @@
         '<button type="button" class="seg-btn' + (stokFilter === 'minus' ? ' active' : '') + '" data-sf="minus">Minus</button>' +
         '</div>' +
         (canViewStockHistory ? '<button type="button" class="btn" id="copy-stok-btn">Salin ke Sheets</button>' : '') +
+        '<button type="button" class="btn" id="stok-export-xlsx-btn">' + iconSvg('download') + '<span>Download Excel (.xlsx)</span></button>' +
         '</div>' +
         '<div class="muted" style="font-size:12.5px;margin-bottom:10px">Menampilkan <strong class="num">' + fmtNum(rows.length) + '</strong> baris stok · Total Qty: <strong class="num">' + fmtNum(totalShownQty) + ' PCS</strong>' +
         (stokCategoryFilter ? ' · Kategori: <strong>' + esc(stokCategoryFilter) + '</strong>' : '') + '</div>' +
@@ -10362,6 +11271,8 @@
           return [r.lok, r.barcode, r.sku, r.nama, r.kategori || 'Lainnya', eb ? eb.exp : '', eb ? eb.expInfo.label : '', r.qty];
         }));
       });
+
+      document.getElementById('stok-export-xlsx-btn')?.addEventListener('click', exportAllDatabaseExcel);
     }
 
     // === HALAMAN 8: SEMUA GUDANG ===
@@ -10465,6 +11376,7 @@
       html += '<div class="card"><div class="card-header"><h2 class="card-title">Matriks Stok SKU × Gudang</h2></div>' +
         '<div class="toolbar">' +
         '<div class="search-wrap"><input id="search-semua" type="search" class="input" placeholder="Cari SKU atau nama produk…" value="' + esc(searchState.semua) + '" /><span class="search-kbd">/</span></div>' +
+        '<button type="button" class="btn" id="allwh-export-xlsx-btn">' + iconSvg('download') + '<span>Download Excel (.xlsx)</span></button>' +
         '<button type="button" class="btn" id="copy-semua-btn">Salin ke Sheets</button>' +
         '</div>' +
         '<div class="table-wrap"><table><thead><tr><th>SKU</th><th>Nama Produk</th>' +
@@ -10493,6 +11405,8 @@
         var s = document.getElementById('search-semua');
         if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
       });
+
+      document.getElementById('allwh-export-xlsx-btn')?.addEventListener('click', exportAllDatabaseExcel);
 
       document.getElementById('copy-semua-btn').addEventListener('click', function () {
         var hdr = ['SKU', 'Nama Produk'].concat(whAnalyses.map(function (w) { return w.meta.nama; })).concat(['Total']);
@@ -11454,7 +12368,8 @@
 
         '<div class="card"><div class="card-header"><h2 class="card-title">Cadangan, Pemulihan &amp; Publikasi</h2></div>' +
         '<div style="display:flex;flex-direction:column;gap:10px">' +
-        '<button type="button" class="btn btn-primary" id="btn-copy-html">Salin HTML Mandiri (Siap Publikasi)</button>' +
+        '<button type="button" class="btn btn-primary" id="btn-export-all-xlsx">' + iconSvg('download') + '<span>Download Semua Database Excel (.xlsx)</span></button>' +
+        '<button type="button" class="btn" id="btn-copy-html">Salin HTML Mandiri (Siap Publikasi)</button>' +
         '<button type="button" class="btn" id="btn-backup-json">Backup JSON Semua Gudang</button>' +
         '<button type="button" class="btn" id="btn-restore-json">Pulihkan Data (JSON Lama / Multi-Gudang)</button>' +
         '<button type="button" class="btn" id="btn-load-sample">Muat Data Contoh ke Gudang Aktif</button>' +
@@ -11492,6 +12407,8 @@
         showToast('Pengaturan disimpan', 'ok');
         renderApp();
       });
+
+      document.getElementById('btn-export-all-xlsx').addEventListener('click', exportAllDatabaseExcel);
 
       document.getElementById('btn-copy-html').addEventListener('click', function () {
         var snap = INITIAL_HTML_SNAPSHOT || ('<!DOCTYPE html>\n' + document.documentElement.outerHTML);
@@ -11715,6 +12632,15 @@
       if (e.target === this) closeMobileDrawer();
     });
 
+    document.getElementById('bulk-tx-close')?.addEventListener('click', closeBulkTxModal);
+    document.getElementById('bulk-tx-cancel')?.addEventListener('click', closeBulkTxModal);
+    document.getElementById('bulk-tx-submit')?.addEventListener('click', function () {
+      if (typeof bulkTxSubmitCb === 'function') bulkTxSubmitCb();
+    });
+    document.getElementById('bulk-tx-modal')?.addEventListener('click', function (e) {
+      if (e.target === this) closeBulkTxModal();
+    });
+
     // Pintasan '/' untuk fokus pencarian & 'Escape' tutup modal
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') {
@@ -11724,6 +12650,7 @@
         closeDetailModal();
         closeMobileDrawer();
         closeRoleModal();
+        closeBulkTxModal();
         return;
       }
       if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
