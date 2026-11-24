@@ -87,8 +87,6 @@ export function renderLoginScreen(errorText) {
       '</form>';
   } else {
     body.innerHTML =
-      '<div class="login-form-head">' +
-      '</div>' +
       errHtml +
       '<form id="form-app-login">' +
       '<div class="field"><label for="login-email">Email</label><input id="login-email" type="email" class="input" required autocomplete="username" placeholder="nama@perusahaan.com" /></div>' +
