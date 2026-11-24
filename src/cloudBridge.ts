@@ -42,8 +42,37 @@ export interface SaveWarehouseStateResult {
   };
 }
 
-async function apiJson<T>(url: string, init: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = 8000
+): Promise<Response> {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller
+    ? setTimeout(() => {
+        controller.abort();
+      }, timeoutMs)
+    : null;
+  try {
+    return await fetch(url, {
+      ...init,
+      credentials: 'same-origin',
+      signal: controller ? controller.signal : init.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      const timeoutErr = new Error('Koneksi lambat atau terputus (timeout).') as Error & { isTimeout?: boolean };
+      timeoutErr.isTimeout = true;
+      throw timeoutErr;
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function apiJson<T>(url: string, init: RequestInit, timeoutMs = 8000): Promise<T> {
+  const res = await fetchWithTimeout(url, init, timeoutMs);
   const contentType = res.headers.get('content-type') || '';
   const isJson = contentType.toLowerCase().includes('application/json');
   const data = isJson ? await res.json() : await res.text();
@@ -83,7 +112,7 @@ export function initCloudBridge(): void {
       }> {
         const headers: Record<string, string> = {};
         if (token) headers.Authorization = `Bearer ${token}`;
-        return apiJson('/api/auth/status', { method: 'GET', headers, cache: 'no-store' });
+        return apiJson('/api/auth/status', { method: 'GET', headers, cache: 'no-store' }, 6000);
       },
 
       async setup(
@@ -111,7 +140,7 @@ export function initCloudBridge(): void {
       async logout(token: string | null): Promise<void> {
         const headers: Record<string, string> = {};
         if (token) headers.Authorization = `Bearer ${token}`;
-        await fetch('/api/auth/logout', { method: 'POST', headers }).catch(() => {});
+        await fetchWithTimeout('/api/auth/logout', { method: 'POST', headers }, 5000).catch(() => {});
       },
 
       async listUsers(
@@ -176,7 +205,7 @@ export function initCloudBridge(): void {
         const headers: Record<string, string> = {};
         if (pinToken) headers.Authorization = `Bearer ${pinToken}`;
         if (appToken) headers['X-App-Auth'] = appToken;
-        return apiJson('/api/pin/status', { method: 'GET', headers, cache: 'no-store' });
+        return apiJson('/api/pin/status', { method: 'GET', headers, cache: 'no-store' }, 6000);
       },
 
       async setupPins(
@@ -221,7 +250,7 @@ export function initCloudBridge(): void {
           method: 'GET',
           headers,
           cache: 'no-store',
-        });
+        }, 8000);
       },
 
       async saveState(
@@ -235,11 +264,11 @@ export function initCloudBridge(): void {
       ): Promise<SaveWarehouseStateResult> {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (appToken) headers['X-App-Auth'] = appToken;
-        const res = await fetch('/api/warehouse/state', {
+        const res = await fetchWithTimeout('/api/warehouse/state', {
           method: 'PUT',
           headers,
           body: JSON.stringify(payload),
-        });
+        }, 12000);
         const contentType = res.headers.get('content-type') || '';
         const isJson = contentType.toLowerCase().includes('application/json');
         if (!isJson) {
@@ -277,11 +306,11 @@ export function initCloudBridge(): void {
       ): Promise<string> {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (appToken) headers['X-App-Auth'] = appToken;
-        const res = await fetch('/api/cycle-count/csv', {
+        const res = await fetchWithTimeout('/api/cycle-count/csv', {
           method: 'POST',
           headers,
           body: JSON.stringify({ lines, tgl, warehouseName }),
-        });
+        }, 10000);
         if (!res.ok) {
           throw new Error(`Gagal membuat CSV (${res.status})`);
         }

@@ -2873,17 +2873,58 @@
       };
     }
 
+    var SYNC_META_KEY = 'sgp1_sync_meta';
+    var SYNC_BASE_KEY = 'sgp1_sync_base';
+
+    function loadSyncMeta() {
+      var m = safeGet(SYNC_META_KEY, null);
+      if (!m || typeof m !== 'object') return { revision: 0, pending: false };
+      return {
+        revision: Number.isFinite(Number(m.revision)) && Number(m.revision) >= 0 ? Math.floor(Number(m.revision)) : 0,
+        pending: Boolean(m.pending)
+      };
+    }
+
+    var initialSyncMeta = loadSyncMeta();
     var sharedSyncState = {
-      revision: 0,
-      snapshot: null,
+      revision: initialSyncMeta.revision,
+      snapshot: safeGet(SYNC_BASE_KEY, null),
       pushTimer: null,
       pollTimer: null,
+      retryTimer: null,
+      retryDelayMs: 2000,
       inFlight: false,
-      dirty: false,
+      dirty: initialSyncMeta.pending,
+      pending: initialSyncMeta.pending,
       pendingRender: false,
+      offlineNotified: false,
       storageMode: 'file',
       hasSessionSecret: true
     };
+
+    function updateSyncButtonUI() {
+      var btn = document.getElementById('cloud-sync-btn');
+      if (!btn) return;
+      var span = btn.querySelector('span');
+      if (span) {
+        span.textContent = sharedSyncState.pending ? 'Menunggu' : 'Sinkron';
+      }
+      btn.title = sharedSyncState.pending
+        ? 'Ada perubahan tersimpan di perangkat menunggu koneksi stabil untuk disinkronkan. Klik untuk coba sinkron sekarang.'
+        : 'Sinkronkan data terbaru lintas perangkat & pengguna';
+    }
+
+    function saveSyncPersistence(saveBase) {
+      safeSet(SYNC_META_KEY, {
+        revision: sharedSyncState.revision,
+        pending: Boolean(sharedSyncState.pending),
+        updatedAt: Date.now()
+      });
+      if (saveBase && sharedSyncState.snapshot) {
+        safeSet(SYNC_BASE_KEY, sharedSyncState.snapshot);
+      }
+      updateSyncButtonUI();
+    }
 
     function cloneJsonSafe(val) {
       try {
@@ -2962,6 +3003,7 @@
 
       sharedSyncState.revision = Number(remote.revision || 0);
       sharedSyncState.snapshot = cloneJsonSafe(buildSharedSnapshotFromLocal());
+      saveSyncPersistence(true);
     }
 
     function mergeArrayByKey3Way(baseArr, localArr, remoteArr, keyFn) {
@@ -3089,14 +3131,40 @@
       return { warehousesMeta: mergedMeta, warehouses: mergedWarehouses };
     }
 
+    function scheduleSharedSyncRetry() {
+      if (!appAuthStatusCache.authenticated || !sharedSyncState.pending) return;
+      if (sharedSyncState.retryTimer) clearTimeout(sharedSyncState.retryTimer);
+      var delay = sharedSyncState.retryDelayMs;
+      sharedSyncState.retryDelayMs = Math.min(15000, Math.round(sharedSyncState.retryDelayMs * 1.8));
+      sharedSyncState.retryTimer = setTimeout(function () {
+        sharedSyncState.retryTimer = null;
+        if (sharedSyncState.pending && appAuthStatusCache.authenticated) {
+          void pushSharedWarehouseState();
+        }
+      }, delay);
+    }
+
     async function pushSharedWarehouseState() {
       if (!appAuthStatusCache.authenticated || !window.__sgpCloud || !window.__sgpCloud.warehouse) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        sharedSyncState.pending = true;
+        sharedSyncState.dirty = true;
+        saveSyncPersistence(false);
+        if (!sharedSyncState.offlineNotified) {
+          sharedSyncState.offlineNotified = true;
+          showToast('Koneksi terputus — perubahan tetap tersimpan di perangkat dan akan disinkronkan otomatis saat online.', 'warn');
+        }
+        return;
+      }
       if (sharedSyncState.inFlight) {
         sharedSyncState.dirty = true;
+        sharedSyncState.pending = true;
+        saveSyncPersistence(false);
         return;
       }
       sharedSyncState.inFlight = true;
       sharedSyncState.dirty = false;
+      var hadPendingBefore = sharedSyncState.pending;
       try {
         var localSnap = buildSharedSnapshotFromLocal();
         var baseRev = sharedSyncState.revision;
@@ -3127,26 +3195,72 @@
           if (retryRes && retryRes.ok) {
             sharedSyncState.revision = Number(retryRes.revision || 0);
             sharedSyncState.snapshot = cloneJsonSafe(buildSharedSnapshotFromLocal());
+            sharedSyncState.pending = false;
+            sharedSyncState.retryDelayMs = 2000;
+            sharedSyncState.offlineNotified = false;
             if (retryRes.storageMode) sharedSyncState.storageMode = retryRes.storageMode;
+            saveSyncPersistence(true);
           }
           triggerRenderOrDefer();
         } else if (res && res.ok) {
           sharedSyncState.revision = Number(res.revision || 0);
           sharedSyncState.snapshot = cloneJsonSafe(localSnap);
+          sharedSyncState.pending = false;
+          sharedSyncState.retryDelayMs = 2000;
           if (res.storageMode) sharedSyncState.storageMode = res.storageMode;
+          saveSyncPersistence(true);
+          if (sharedSyncState.offlineNotified && hadPendingBefore) {
+            sharedSyncState.offlineNotified = false;
+            showToast('Koneksi kembali stabil — seluruh perubahan tertunda berhasil disinkronkan.', 'ok');
+          } else {
+            sharedSyncState.offlineNotified = false;
+          }
         }
       } catch (err) {
-        console.error('Sinkronisasi data gudang gagal:', err);
+        if (err && err.status === 401) {
+          sharedSyncState.pending = true;
+          sharedSyncState.dirty = false;
+          saveSyncPersistence(false);
+          void syncAppAuthStatus(true);
+        } else {
+          sharedSyncState.pending = true;
+          sharedSyncState.dirty = true;
+          saveSyncPersistence(false);
+          scheduleSharedSyncRetry();
+          if (!sharedSyncState.offlineNotified) {
+            sharedSyncState.offlineNotified = true;
+            showToast('Koneksi tidak stabil — data aman tersimpan di perangkat, sinkronisasi ulang otomatis berjalan.', 'warn');
+          }
+        }
       } finally {
         sharedSyncState.inFlight = false;
-        if (sharedSyncState.dirty) {
-          scheduleSharedSyncPush();
+        if (sharedSyncState.dirty && appAuthStatusCache.authenticated && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+          if (!sharedSyncState.retryTimer) {
+            scheduleSharedSyncPush();
+          }
         }
       }
     }
 
     async function pullSharedWarehouseState(isInitialOrManual) {
       if (!appAuthStatusCache.authenticated || !window.__sgpCloud || !window.__sgpCloud.warehouse) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        if (isInitialOrManual === 'manual') {
+          showToast('Perangkat sedang offline. Data tetap tersimpan aman secara lokal.', 'warn');
+        }
+        return;
+      }
+      if (sharedSyncState.pending) {
+        if (isInitialOrManual === 'manual') {
+          await pushSharedWarehouseState();
+          if (!sharedSyncState.pending) {
+            showToast('Perubahan tertunda berhasil disinkronkan ke server', 'ok');
+          }
+        } else if (!sharedSyncState.inFlight && !sharedSyncState.pushTimer && !sharedSyncState.retryTimer) {
+          void pushSharedWarehouseState();
+        }
+        return;
+      }
       if (sharedSyncState.inFlight || sharedSyncState.dirty || sharedSyncState.pushTimer) return;
       sharedSyncState.inFlight = true;
       try {
@@ -3166,6 +3280,7 @@
           }
           sharedSyncState.revision = 0;
           sharedSyncState.snapshot = cloneJsonSafe(localSnap);
+          saveSyncPersistence(true);
           return;
         }
 
@@ -3182,20 +3297,28 @@
           showToast('Data sudah versi terbaru', 'ok');
         }
       } catch (err) {
-        if (isInitialOrManual === 'manual') {
-          showToast((err && err.message) || 'Gagal menyinkronkan data', 'err');
+        if (err && err.status === 401) {
+          void syncAppAuthStatus(true);
+        } else if (isInitialOrManual === 'manual') {
+          showToast((err && err.message) || 'Koneksi tidak stabil, data lokal tetap aman', 'warn');
         }
       } finally {
         sharedSyncState.inFlight = false;
-        if (sharedSyncState.dirty) {
+        if (sharedSyncState.dirty && !sharedSyncState.retryTimer) {
           scheduleSharedSyncPush();
         }
       }
     }
 
     function scheduleSharedSyncPush() {
-      if (!appAuthStatusCache.authenticated) return;
       sharedSyncState.dirty = true;
+      sharedSyncState.pending = true;
+      saveSyncPersistence(false);
+      if (!appAuthStatusCache.authenticated) return;
+      if (sharedSyncState.retryTimer) {
+        clearTimeout(sharedSyncState.retryTimer);
+        sharedSyncState.retryTimer = null;
+      }
       if (sharedSyncState.pushTimer) clearTimeout(sharedSyncState.pushTimer);
       sharedSyncState.pushTimer = setTimeout(function () {
         sharedSyncState.pushTimer = null;
@@ -3205,11 +3328,22 @@
 
     function startSharedSyncLoop() {
       stopSharedSyncLoop(false);
+      updateSyncButtonUI();
       sharedSyncState.pollTimer = setInterval(function () {
         if (document.hidden || !appAuthStatusCache.authenticated) return;
+        if (sharedSyncState.pending) {
+          if (!sharedSyncState.inFlight && !sharedSyncState.pushTimer && !sharedSyncState.retryTimer) {
+            void pushSharedWarehouseState();
+          }
+          return;
+        }
         void pullSharedWarehouseState(false);
       }, 3000);
-      void pullSharedWarehouseState(true);
+      if (sharedSyncState.pending) {
+        void pushSharedWarehouseState();
+      } else {
+        void pullSharedWarehouseState(true);
+      }
     }
 
     function stopSharedSyncLoop(resetState) {
@@ -3221,11 +3355,21 @@
         clearTimeout(sharedSyncState.pushTimer);
         sharedSyncState.pushTimer = null;
       }
+      if (sharedSyncState.retryTimer) {
+        clearTimeout(sharedSyncState.retryTimer);
+        sharedSyncState.retryTimer = null;
+      }
       if (resetState) {
         sharedSyncState.revision = 0;
         sharedSyncState.snapshot = null;
         sharedSyncState.dirty = false;
+        sharedSyncState.pending = false;
         sharedSyncState.pendingRender = false;
+        sharedSyncState.retryDelayMs = 2000;
+        sharedSyncState.offlineNotified = false;
+        safeDel(SYNC_META_KEY);
+        safeDel(SYNC_BASE_KEY);
+        updateSyncButtonUI();
       }
     }
 
@@ -4214,7 +4358,38 @@
     }
 
     // === STATE UI, TEMA, TOAST & MODAL ===
-    var currentTab = 'masuk';
+    var AUTH_TOKEN_KEY = 'sgp1_auth_token';
+    var PIN_TOKEN_KEY = 'sgp1_pin_token';
+    var PIN_ROLE_KEY = 'sgp1_pin_role';
+    var ACTIVE_TAB_KEY = 'sgp1_active_tab';
+
+    function sessionGetRaw(key) {
+      try { return sessionStorage.getItem(key); } catch (e) { return null; }
+    }
+    function sessionSetRaw(key, val) {
+      try {
+        if (val === null || val === undefined || val === '') sessionStorage.removeItem(key);
+        else sessionStorage.setItem(key, String(val));
+      } catch (e) {}
+    }
+    function decodeTokenPayload(tok) {
+      if (!tok || typeof tok !== 'string') return null;
+      var parts = tok.split('.');
+      if (parts.length !== 2 || !parts[0]) return null;
+      try {
+        var b64 = parts[0].replace(/-/g, '+').replace(/_/g, '/');
+        while (b64.length % 4) b64 += '=';
+        var json = atob(b64);
+        var obj = JSON.parse(json);
+        if (!obj || typeof obj.exp !== 'number' || Date.now() > obj.exp) return null;
+        return obj;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    var savedTabOnBoot = sessionGetRaw(ACTIVE_TAB_KEY);
+    var currentTab = savedTabOnBoot || 'masuk';
     var searchState = { masuk: '', keluar: '', stok: '', semua: '', pindah: '', defect: '', expire: '' };
     var stokFilter = 'all';
     var stokCategoryFilter = '';
@@ -4226,15 +4401,46 @@
     var lastRapidKeluarId = '';
     var settingsTab = 'role'; // 'role' | 'master' | 'tools'
 
-    // Role & Sesi Login/PIN (disimpan khusus di memori runtime, tidak di localStorage)
-    var appAuthToken = '';
-    var appAuthEmail = '';
+    // Sesi Login disimpan di HttpOnly cookie server + fallback token agar refresh browser tidak kembali ke login
+    var initialStoredAuthTok = safeGetRaw(AUTH_TOKEN_KEY) || '';
+    if (initialStoredAuthTok && !decodeTokenPayload(initialStoredAuthTok)) {
+      safeDel(AUTH_TOKEN_KEY);
+      initialStoredAuthTok = '';
+    }
+    var initialStoredPinTok = sessionGetRaw(PIN_TOKEN_KEY) || '';
+    var initialStoredPinRole = sessionGetRaw(PIN_ROLE_KEY) || '';
+    if (initialStoredPinTok && !decodeTokenPayload(initialStoredPinTok)) {
+      sessionSetRaw(PIN_TOKEN_KEY, '');
+      sessionSetRaw(PIN_ROLE_KEY, '');
+      initialStoredPinTok = '';
+      initialStoredPinRole = '';
+    }
+
+    var appAuthToken = initialStoredAuthTok;
+    var appAuthEmail = (decodeTokenPayload(initialStoredAuthTok) && decodeTokenPayload(initialStoredAuthTok).sub) || '';
     var appAuthSessionRole = null; // null | 'stockkeeper' | 'admin' | 'super_admin'
     var appAuthStatusCache = { loaded: false, configured: true, envManaged: false, authenticated: false };
-    var pinSessionToken = '';
-    var pinSessionRole = null; // null | 'admin' | 'super_admin'
+    var pinSessionToken = initialStoredPinTok;
+    var pinSessionRole = (initialStoredPinRole === 'admin' || initialStoredPinRole === 'super_admin') ? initialStoredPinRole : null;
     var rolePreviewOverride = ''; // opsional jika admin/super_admin ingin memakai mode lebih rendah
     var pinStatusCache = { loaded: false, configured: false, envManaged: false, hasAdminPin: false, hasSuperAdminPin: false };
+
+    function persistAppAuthToken(tok) {
+      appAuthToken = String(tok || '').trim();
+      if (appAuthToken) safeSetRaw(AUTH_TOKEN_KEY, appAuthToken);
+      else safeDel(AUTH_TOKEN_KEY);
+    }
+
+    function safeSetRaw(key, val) {
+      try { localStorage.setItem(key, String(val)); } catch (e) {}
+    }
+
+    function persistPinSession(tok, role) {
+      pinSessionToken = String(tok || '').trim();
+      pinSessionRole = (role === 'admin' || role === 'super_admin') ? role : null;
+      sessionSetRaw(PIN_TOKEN_KEY, pinSessionToken);
+      sessionSetRaw(PIN_ROLE_KEY, pinSessionRole || '');
+    }
 
     var ROLE_LABELS = {
       stockkeeper: 'Stockkeeper',
@@ -4973,6 +5179,14 @@
           hasAdminPin: !!res.hasAdminPin,
           hasSuperAdminPin: !!res.hasSuperAdminPin
         };
+        if (pinSessionToken && !res.sessionValid) {
+          persistPinSession('', null);
+          rolePreviewOverride = '';
+          renderApp();
+        } else if (res.sessionValid && res.sessionRole && pinSessionRole !== res.sessionRole) {
+          persistPinSession(pinSessionToken, res.sessionRole);
+          renderApp();
+        }
       } catch {
         pinStatusCache.loaded = false;
       }
@@ -5081,8 +5295,7 @@
         var lockPinBtn = document.getElementById('modal-pin-lock-btn');
         if (lockPinBtn) {
           lockPinBtn.addEventListener('click', function () {
-            pinSessionToken = '';
-            pinSessionRole = null;
+            persistPinSession('', null);
             rolePreviewOverride = '';
             currentTab = defaultTabForRole(getEffectiveRole());
             closeRoleModal();
@@ -5118,8 +5331,7 @@
                 null,
                 appAuthToken || null
               );
-              pinSessionToken = res.token;
-              pinSessionRole = res.role;
+              persistPinSession(res.token, res.role);
               rolePreviewOverride = '';
               pinStatusCache.configured = true;
               pinStatusCache.hasAdminPin = true;
@@ -5141,8 +5353,7 @@
             var pinVal = document.getElementById('verify-pin-inp').value.trim();
             try {
               var res = await window.__sgpCloud.pinAuth.verifyPin(pendingTarget, pinVal, appAuthToken || null);
-              pinSessionToken = res.token;
-              pinSessionRole = res.role;
+              persistPinSession(res.token, res.role);
               rolePreviewOverride = '';
               currentTab = defaultTabForRole(res.role);
               closeRoleModal();
@@ -11045,8 +11256,7 @@
         var sessionLockBtn = document.getElementById('session-lock-btn');
         if (sessionLockBtn) {
           sessionLockBtn.addEventListener('click', function () {
-            pinSessionToken = '';
-            pinSessionRole = null;
+            persistPinSession('', null);
             rolePreviewOverride = '';
             currentTab = defaultTabForRole(getEffectiveRole());
             showToast('Akses PIN dikunci. Kembali ke mode Stockkeeper.', 'ok');
@@ -11075,8 +11285,7 @@
                 pinSessionToken || null,
                 appAuthToken || null
               );
-              pinSessionToken = res.token;
-              pinSessionRole = res.role;
+              persistPinSession(res.token, res.role);
               pinStatusCache.configured = true;
               pinStatusCache.hasAdminPin = true;
               pinStatusCache.hasSuperAdminPin = true;
@@ -11091,8 +11300,7 @@
         var pinLogoutBtn = document.getElementById('pin-logout-btn');
         if (pinLogoutBtn) {
           pinLogoutBtn.addEventListener('click', function () {
-            pinSessionToken = '';
-            pinSessionRole = null;
+            persistPinSession('', null);
             rolePreviewOverride = '';
             currentTab = defaultTabForRole(getEffectiveRole());
             showToast('Sesi PIN dikunci', 'ok');
@@ -11384,6 +11592,7 @@
     // === RENDER UTAMA & EVENT GLOBAL ===
     function renderApp() {
       var role = enforceRoleRouteGuard();
+      sessionSetRaw(ACTIVE_TAB_KEY, currentTab);
       var options = getSelectableWarehouses(role);
       if (options.length && !options.some(function (warehouse) { return warehouse.id === W.cur; })) {
         W.cur = options[0].id;
@@ -11530,7 +11739,9 @@
     });
 
     // === GERBANG LOGIN EMAIL & PASSWORD BIASA ===
-    function setAuthUnlockedState(unlocked, email, role) {
+    function setAuthUnlockedState(unlocked, email, role, options) {
+      var wasUnlocked = appAuthStatusCache.authenticated;
+      var prevEmail = appAuthEmail;
       appAuthStatusCache.authenticated = Boolean(unlocked);
       var syncBtn = document.getElementById('cloud-sync-btn');
       if (unlocked) {
@@ -11544,18 +11755,26 @@
         var logoutBtn = document.getElementById('app-logout-btn');
         if (logoutBtn) logoutBtn.style.display = '';
         if (syncBtn) syncBtn.style.display = '';
-        currentTab = defaultTabForRole(getEffectiveRole());
+        updateSyncButtonUI();
+        var allowed = getAllowedTabsForRole(getEffectiveRole());
+        if ((options && options.freshLogin) || allowed.indexOf(currentTab) < 0) {
+          currentTab = defaultTabForRole(getEffectiveRole());
+        }
         renderApp();
-        refreshPinStatus();
-        startSharedSyncLoop();
+        if (!wasUnlocked || prevEmail !== appAuthEmail) {
+          if (!(options && options.skipRemoteCheck)) {
+            refreshPinStatus();
+          }
+          startSharedSyncLoop();
+        }
       } else {
-        stopSharedSyncLoop(true);
-        appAuthToken = '';
+        stopSharedSyncLoop(Boolean(options && options.clearSyncState));
+        persistAppAuthToken('');
+        persistPinSession('', null);
         appAuthEmail = '';
         appAuthSessionRole = null;
-        pinSessionToken = '';
-        pinSessionRole = null;
         rolePreviewOverride = '';
+        sessionSetRaw(ACTIVE_TAB_KEY, '');
         document.body.classList.add('auth-locked');
         var logoutBtnHide = document.getElementById('app-logout-btn');
         if (logoutBtnHide) logoutBtnHide.style.display = 'none';
@@ -11628,6 +11847,7 @@
           try {
             var res = await fetch('/api/auth/setup', {
               method: 'POST',
+              credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ email: emailVal, password: pw1 })
             });
@@ -11637,6 +11857,7 @@
               appAuthStatusCache.envManaged = Boolean(data && data.envManaged);
               var loginRes = await fetch('/api/auth/login', {
                 method: 'POST',
+                credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email: emailVal, password: pw1 })
               });
@@ -11644,15 +11865,15 @@
               if (!loginRes.ok) {
                 throw new Error((loginData && loginData.error) || 'Akun login sudah aktif di server. Silakan masuk dengan email & password yang benar.');
               }
-              appAuthToken = loginData.token;
-              setAuthUnlockedState(true, loginData.email, loginData.role);
+              persistAppAuthToken(loginData.token);
+              setAuthUnlockedState(true, loginData.email, loginData.role, { freshLogin: true });
               showToast('Berhasil masuk sebagai Stockkeeper (' + loginData.email + ')', 'ok');
               return;
             }
             if (!res.ok) throw new Error(data.error || 'Gagal menyimpan akun login.');
-            appAuthToken = data.token;
+            persistAppAuthToken(data.token);
             appAuthStatusCache.configured = true;
-            setAuthUnlockedState(true, data.email, data.role);
+            setAuthUnlockedState(true, data.email, data.role, { freshLogin: true });
             showToast('Akun login berhasil dibuat (Role: Stockkeeper)', 'ok');
           } catch (err) {
             renderLoginScreen((err && err.message) || 'Gagal menyimpan akun login.');
@@ -11673,6 +11894,7 @@
           try {
             var res = await fetch('/api/auth/login', {
               method: 'POST',
+              credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ email: emailVal, password: pwVal })
             });
@@ -11683,8 +11905,8 @@
               }
               throw new Error((data && data.error) || 'Email atau password salah.');
             }
-            appAuthToken = data.token;
-            setAuthUnlockedState(true, data.email, data.role);
+            persistAppAuthToken(data.token);
+            setAuthUnlockedState(true, data.email, data.role, { freshLogin: true });
             showToast('Berhasil masuk sebagai Stockkeeper (' + data.email + ')', 'ok');
           } catch (err) {
             renderLoginScreen((err && err.message) || 'Gagal masuk.');
@@ -11698,9 +11920,18 @@
     async function syncAppAuthStatus(preserveError) {
       var lastErr = null;
       for (var attempt = 0; attempt < 2; attempt++) {
+        var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        var timer = controller ? setTimeout(function () { controller.abort(); }, 6000) : null;
         try {
           var headers = appAuthToken ? { Authorization: 'Bearer ' + appAuthToken } : {};
-          var res = await fetch('/api/auth/status', { method: 'GET', headers: headers, cache: 'no-store' });
+          var res = await fetch('/api/auth/status', {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: headers,
+            cache: 'no-store',
+            signal: controller ? controller.signal : undefined
+          });
+          if (timer) clearTimeout(timer);
           var ct = String((res.headers && res.headers.get('content-type')) || '').toLowerCase();
           if (!res.ok || !ct.includes('application/json')) {
             throw new Error('Server autentikasi tidak merespons dengan benar (HTTP ' + res.status + '). Coba muat ulang halaman.');
@@ -11718,19 +11949,33 @@
           if (st.authenticated && st.email) {
             setAuthUnlockedState(true, st.email, st.role);
           } else {
-            setAuthUnlockedState(false, '', null);
+            setAuthUnlockedState(false, '', null, { clearSyncState: !sharedSyncState.pending });
             if (!preserveError || prevConfigured !== appAuthStatusCache.configured) {
               renderLoginScreen('');
             }
           }
           return;
         } catch (err) {
+          if (timer) clearTimeout(timer);
           lastErr = err;
           if (attempt === 0) {
             await new Promise(function (resolve) { setTimeout(resolve, 450); });
           }
         }
       }
+
+      // Jika jaringan sedang offline / lambat saat refresh, tetap izinkan sesi lokal yang belum kedaluwarsa agar input data tetap berjalan
+      var cachedPayload = decodeTokenPayload(appAuthToken);
+      if (cachedPayload && cachedPayload.sub) {
+        appAuthStatusCache.loaded = true;
+        appAuthStatusCache.configured = true;
+        setAuthUnlockedState(true, cachedPayload.sub, cachedPayload.role || 'stockkeeper', { skipRemoteCheck: true });
+        if (!preserveError) {
+          showToast('Koneksi tidak stabil — masuk dengan sesi tersimpan. Data tetap bisa disimpan di perangkat.', 'warn');
+        }
+        return;
+      }
+
       appAuthStatusCache.loaded = true;
       if (!preserveError) {
         renderLoginScreen((lastErr && lastErr.message) || 'Server autentikasi tidak merespons. Coba muat ulang halaman.');
@@ -11746,13 +11991,12 @@
             '<p style="margin:0">Keluar dari sesi login saat ini dan kembali ke halaman masuk?</p>',
             function () {
               var tok = appAuthToken;
-              setAuthUnlockedState(false, '', null);
-              if (tok) {
-                fetch('/api/auth/logout', {
-                  method: 'POST',
-                  headers: { Authorization: 'Bearer ' + tok }
-                }).catch(function () {});
-              }
+              setAuthUnlockedState(false, '', null, { clearSyncState: true });
+              fetch('/api/auth/logout', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: tok ? { Authorization: 'Bearer ' + tok } : {}
+              }).catch(function () {});
               renderLoginScreen('');
               showToast('Anda telah keluar dari aplikasi', 'info');
             },
@@ -11773,13 +12017,26 @@
 
       document.addEventListener('visibilitychange', function () {
         if (!document.hidden && appAuthStatusCache.authenticated) {
-          void pullSharedWarehouseState(false);
+          if (sharedSyncState.pending) void pushSharedWarehouseState();
+          else void pullSharedWarehouseState(false);
+        }
+      });
+
+      window.addEventListener('online', function () {
+        if (!appAuthStatusCache.authenticated) {
+          void syncAppAuthStatus(true);
+        } else {
+          void syncAppAuthStatus(true);
+          if (sharedSyncState.pending) void pushSharedWarehouseState();
+          else void pullSharedWarehouseState(false);
         }
       });
 
       window.addEventListener('focus', function () {
         if (!appAuthStatusCache.authenticated) {
           void syncAppAuthStatus(true);
+        } else if (sharedSyncState.pending) {
+          void pushSharedWarehouseState();
         } else {
           void pullSharedWarehouseState(false);
         }

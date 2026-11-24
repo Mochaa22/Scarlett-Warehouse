@@ -89,16 +89,39 @@ function asyncHandler(
 }
 
 function getKvConfig(): { url: string; token: string } | null {
-  const rawUrl = String(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').trim();
-  const rawToken = String(process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
-  if (!rawUrl || !rawToken) return null;
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== 'https:') return null;
-    return { url: parsed.toString().replace(/\/+$/, ''), token: rawToken };
-  } catch {
-    return null;
+  const candidates: Array<{ url: string; token: string }> = [
+    {
+      url: String(process.env.KV_REST_API_URL || '').trim(),
+      token: String(process.env.KV_REST_API_TOKEN || '').trim(),
+    },
+    {
+      url: String(process.env.UPSTASH_REDIS_REST_URL || '').trim(),
+      token: String(process.env.UPSTASH_REDIS_REST_TOKEN || '').trim(),
+    },
+  ];
+
+  for (const [envKey, envVal] of Object.entries(process.env)) {
+    if (!envKey.endsWith('_REST_API_URL') || !envVal) continue;
+    const prefix = envKey.slice(0, -'_REST_API_URL'.length);
+    if (prefix === 'KV' || prefix === 'UPSTASH_REDIS') continue;
+    const tokenVal = String(process.env[`${prefix}_REST_API_TOKEN`] || '').trim();
+    if (tokenVal) {
+      candidates.push({ url: String(envVal).trim(), token: tokenVal });
+    }
   }
+
+  for (const item of candidates) {
+    if (!item.url || !item.token) continue;
+    try {
+      const parsed = new URL(item.url);
+      if (parsed.protocol === 'https:') {
+        return { url: parsed.toString().replace(/\/+$/, ''), token: item.token };
+      }
+    } catch {
+      // Ignore malformed candidate URL
+    }
+  }
+  return null;
 }
 
 function getStorageMode(): StorageMode {
@@ -559,6 +582,60 @@ function verifyAppAuthToken(rawToken: string | null | undefined): AppAuthSession
   }
 }
 
+const APP_AUTH_COOKIE_NAME = 'sgp_app_auth';
+
+function parseCookies(req: Request): Record<string, string> {
+  const header = String(req.headers.cookie || '');
+  if (!header) return {};
+  const out: Record<string, string> = {};
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq <= 0) continue;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (!k) continue;
+    try {
+      out[k] = decodeURIComponent(v);
+    } catch {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function isHttpsRequest(req: Request): boolean {
+  if (req.secure) return true;
+  const proto = String(req.headers['x-forwarded-proto'] || '').toLowerCase();
+  return proto.includes('https');
+}
+
+function setAuthCookie(res: Response, req: Request, token: string): void {
+  const maxAgeSec = Math.floor(SESSION_TTL_MS / 1000);
+  const https = isHttpsRequest(req);
+  const parts = [
+    `${APP_AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    `Max-Age=${maxAgeSec}`,
+    https ? 'SameSite=None' : 'SameSite=Lax',
+  ];
+  if (https) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+function clearAuthCookie(res: Response, req: Request): void {
+  const https = isHttpsRequest(req);
+  const parts = [
+    `${APP_AUTH_COOKIE_NAME}=`,
+    'Path=/',
+    'HttpOnly',
+    'Max-Age=0',
+    https ? 'SameSite=None' : 'SameSite=Lax',
+  ];
+  if (https) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
 function extractBearerToken(req: Request): string | null {
   const authHeader = String(req.headers.authorization || '').trim();
   if (authHeader.toLowerCase().startsWith('bearer ')) {
@@ -572,7 +649,10 @@ function extractAppAuthToken(req: Request): string | null {
   if (typeof custom === 'string' && custom.trim()) {
     return custom.trim();
   }
-  return extractBearerToken(req);
+  const bearer = extractBearerToken(req);
+  if (bearer) return bearer;
+  const cookies = parseCookies(req);
+  return cookies[APP_AUTH_COOKIE_NAME] || null;
 }
 
 function extractPinToken(req: Request): string | null {
@@ -802,7 +882,9 @@ export function createApp() {
         updatedAt: new Date().toISOString(),
       });
 
-      res.json(issueAppAuthToken(emailLower, 'stockkeeper'));
+      const issued = issueAppAuthToken(emailLower, 'stockkeeper');
+      setAuthCookie(res, req, issued.token);
+      res.json(issued);
     })
   );
 
@@ -880,11 +962,14 @@ export function createApp() {
       }
 
       clearFailures(rateKey);
-      res.json(issueAppAuthToken(matchedEmail, 'stockkeeper'));
+      const issued = issueAppAuthToken(matchedEmail, 'stockkeeper');
+      setAuthCookie(res, req, issued.token);
+      res.json(issued);
     })
   );
 
-  app.post('/api/auth/logout', (_req: Request, res: Response) => {
+  app.post('/api/auth/logout', (req: Request, res: Response) => {
+    clearAuthCookie(res, req);
     res.json({ ok: true });
   });
 
