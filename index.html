@@ -2047,6 +2047,9 @@
         <button type="button" id="role-switch-btn" class="role-btn" title="Pilih atau ganti role (Stockkeeper / Admin / Super Admin)">
           <span id="role-switch-label">Stockkeeper</span>
         </button>
+        <button type="button" id="cloud-sync-btn" class="icon-btn" style="display:none" title="Sinkronkan data terbaru lintas perangkat & pengguna">
+          <span>Sinkron</span>
+        </button>
         <button type="button" id="theme-toggle" class="icon-btn" title="Ganti tema terang atau gelap" aria-label="Ganti tema">
           <span id="theme-icon" aria-hidden="true"></span>
           <span id="theme-label">Tema</span>
@@ -2789,8 +2792,11 @@
       return reg;
     }
 
-    function saveRegistry() {
+    function saveRegistry(syncShared) {
       safeSet(REG_KEY, W);
+      if (syncShared) {
+        scheduleSharedSyncPush();
+      }
     }
 
     function getWhMeta(wid) {
@@ -2867,40 +2873,381 @@
       };
     }
 
-    var cloudSyncTimers = Object.create(null);
-    function scheduleCloudPush(wid) {
-      if (typeof window === 'undefined' || !window.__sgpCloud || !window.__sgpCloud.getUser || !window.__sgpCloud.getUser()) return;
-      if (cloudSyncTimers[wid]) clearTimeout(cloudSyncTimers[wid]);
-      var owner = window.__sgpCloud.getUser().uid;
-      cloudSyncTimers[wid] = setTimeout(function () {
-        try {
-          var currentUser = window.__sgpCloud.getUser();
-          if (!currentUser || currentUser.uid !== owner) return;
-          var meta = getWhMeta(wid);
-          var data = readWarehouseData(wid);
-          window.__sgpCloud.pushWarehouse(meta, data).catch(function (err) {
-            console.error('Sinkronisasi cloud tertunda:', err);
-          });
-        } catch (e) {
-          console.error(e);
-        }
-      }, 900);
+    var sharedSyncState = {
+      revision: 0,
+      snapshot: null,
+      pushTimer: null,
+      pollTimer: null,
+      inFlight: false,
+      dirty: false,
+      pendingRender: false,
+      storageMode: 'file',
+      hasSessionSecret: true
+    };
+
+    function cloneJsonSafe(val) {
+      try {
+        return JSON.parse(JSON.stringify(val));
+      } catch (e) {
+        return val;
+      }
     }
 
-    function writeWarehouseData(wid, data) {
+    function buildSharedSnapshotFromLocal() {
+      var metaList = W.list.map(function (w) {
+        return { id: w.id, nama: w.nama, legacy: Boolean(w.legacy) };
+      });
+      var whMap = {};
+      metaList.forEach(function (w) {
+        whMap[w.id] = readWarehouseData(w.id);
+      });
+      return { warehousesMeta: metaList, warehouses: whMap };
+    }
+
+    function isSharedSnapshotEmpty(snap) {
+      if (!snap || !Array.isArray(snap.warehousesMeta)) return true;
+      if (snap.warehousesMeta.length > 1) return false;
+      var firstId = snap.warehousesMeta[0] && snap.warehousesMeta[0].id;
+      var wd = (firstId && snap.warehouses && snap.warehouses[firstId]) || null;
+      if (!wd) return true;
+      var arrayKeys = ['master', 'lokasi', 'opening', 'allstock', 'masuk', 'keluar', 'pindah', 'defect', 'batches', 'cycleCounts', 'inboundRegister'];
+      return arrayKeys.every(function (k) {
+        return !Array.isArray(wd[k]) || wd[k].length === 0;
+      });
+    }
+
+    function isUserEditingFormInView() {
+      var ae = document.activeElement;
+      if (!ae) return false;
+      var tag = String(ae.tagName || '').toUpperCase();
+      if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') return false;
+      var inView = Boolean(ae.closest && ae.closest('#view-root'));
+      var inModal = Boolean(ae.closest && ae.closest('.modal-backdrop.open'));
+      return inView || inModal;
+    }
+
+    function triggerRenderOrDefer() {
+      if (isUserEditingFormInView()) {
+        sharedSyncState.pendingRender = true;
+        return;
+      }
+      sharedSyncState.pendingRender = false;
+      renderApp();
+    }
+
+    function applySharedStateLocally(remote) {
+      if (!remote || !Array.isArray(remote.warehousesMeta) || remote.warehousesMeta.length === 0) return;
+      var prevCur = W.cur;
+      var prevIds = W.list.map(function (w) { return w.id; });
+      W.list = remote.warehousesMeta.map(function (w) {
+        return { id: w.id, nama: w.nama, legacy: Boolean(w.legacy) };
+      });
+      if (!W.list.some(function (w) { return w.id === prevCur; })) {
+        W.cur = W.list[0].id;
+      }
+      safeSet(REG_KEY, W);
+
+      var nextIds = new Set(W.list.map(function (w) { return w.id; }));
+      prevIds.forEach(function (oldId) {
+        if (!nextIds.has(oldId)) {
+          deleteWarehouseStorage(oldId, true);
+        }
+      });
+
+      W.list.forEach(function (w) {
+        var incoming = remote.warehouses && remote.warehouses[w.id];
+        var mergedWh = Object.assign(defaultWhData(), incoming || {});
+        writeWarehouseData(w.id, mergedWh, true);
+      });
+
+      sharedSyncState.revision = Number(remote.revision || 0);
+      sharedSyncState.snapshot = cloneJsonSafe(buildSharedSnapshotFromLocal());
+    }
+
+    function mergeArrayByKey3Way(baseArr, localArr, remoteArr, keyFn) {
+      var baseMap = new Map();
+      var localMap = new Map();
+      var remoteMap = new Map();
+      var order = [];
+      var seenOrder = new Set();
+
+      function pushOrder(k) {
+        if (!seenOrder.has(k)) {
+          seenOrder.add(k);
+          order.push(k);
+        }
+      }
+
+      (Array.isArray(baseArr) ? baseArr : []).forEach(function (item) {
+        var k = keyFn(item);
+        if (!k) return;
+        baseMap.set(k, item);
+      });
+      (Array.isArray(remoteArr) ? remoteArr : []).forEach(function (item) {
+        var k = keyFn(item);
+        if (!k) return;
+        remoteMap.set(k, item);
+        pushOrder(k);
+      });
+      (Array.isArray(localArr) ? localArr : []).forEach(function (item) {
+        var k = keyFn(item);
+        if (!k) return;
+        localMap.set(k, item);
+        pushOrder(k);
+      });
+
+      var out = [];
+      order.forEach(function (k) {
+        var inBase = baseMap.has(k);
+        var inLocal = localMap.has(k);
+        var inRemote = remoteMap.has(k);
+        var bItem = baseMap.get(k);
+        var lItem = localMap.get(k);
+        var rItem = remoteMap.get(k);
+
+        if (inLocal && inRemote) {
+          var lStr = JSON.stringify(lItem);
+          var rStr = JSON.stringify(rItem);
+          if (lStr === rStr) {
+            out.push(rItem);
+          } else if (inBase) {
+            var bStr = JSON.stringify(bItem);
+            if (lStr === bStr) out.push(rItem);
+            else out.push(lItem);
+          } else {
+            out.push(lItem);
+          }
+        } else if (inLocal && !inRemote) {
+          if (!inBase) {
+            out.push(lItem);
+          } else if (JSON.stringify(lItem) !== JSON.stringify(bItem)) {
+            out.push(lItem);
+          }
+        } else if (!inLocal && inRemote) {
+          if (!inBase) {
+            out.push(rItem);
+          } else if (JSON.stringify(rItem) !== JSON.stringify(bItem)) {
+            out.push(rItem);
+          }
+        }
+      });
+      return out;
+    }
+
+    function mergeWarehouseData3Way(baseWh, localWh, remoteWh) {
+      var b = Object.assign(defaultWhData(), baseWh || {});
+      var l = Object.assign(defaultWhData(), localWh || {});
+      var r = Object.assign(defaultWhData(), remoteWh || {});
+      var out = defaultWhData();
+
+      ['masuk', 'keluar', 'pindah', 'defect', 'batches', 'cycleCounts', 'inboundRegister'].forEach(function (field) {
+        out[field] = mergeArrayByKey3Way(b[field], l[field], r[field], function (it) {
+          return it && it.id ? String(it.id) : JSON.stringify(it);
+        });
+      });
+
+      out.master = mergeArrayByKey3Way(b.master, l.master, r.master, function (m) {
+        return normSku(m && m.sku) + '|' + normBarcode(m && m.barcode);
+      });
+
+      out.lokasi = mergeArrayByKey3Way(b.lokasi, l.lokasi, r.lokasi, function (loc) {
+        return normLoc(loc);
+      });
+
+      ['opening', 'allstock'].forEach(function (field) {
+        out[field] = mergeArrayByKey3Way(b[field], l[field], r[field], function (it) {
+          return normLoc(it && it.lok) + '|' + normSku(it && it.sku) + '|' + normBarcode(it && it.barcode);
+        });
+      });
+
+      ['cutoff', 'min', 'mode', 'cover', 'expMonths'].forEach(function (scalarField) {
+        out[scalarField] = l[scalarField] !== b[scalarField] ? l[scalarField] : r[scalarField];
+      });
+
+      return out;
+    }
+
+    function mergeSnapshots3Way(baseSnap, localSnap, remoteSnap) {
+      var baseMeta = (baseSnap && baseSnap.warehousesMeta) || [];
+      var localMeta = (localSnap && localSnap.warehousesMeta) || [];
+      var remoteMeta = (remoteSnap && remoteSnap.warehousesMeta) || [];
+      var mergedMeta = mergeArrayByKey3Way(baseMeta, localMeta, remoteMeta, function (w) {
+        return w && w.id ? String(w.id) : '';
+      });
+      if (!mergedMeta.length) mergedMeta = remoteMeta.length ? remoteMeta : localMeta;
+
+      var mergedWarehouses = {};
+      mergedMeta.forEach(function (meta) {
+        var wid = meta.id;
+        mergedWarehouses[wid] = mergeWarehouseData3Way(
+          baseSnap && baseSnap.warehouses && baseSnap.warehouses[wid],
+          localSnap && localSnap.warehouses && localSnap.warehouses[wid],
+          remoteSnap && remoteSnap.warehouses && remoteSnap.warehouses[wid]
+        );
+      });
+
+      return { warehousesMeta: mergedMeta, warehouses: mergedWarehouses };
+    }
+
+    async function pushSharedWarehouseState() {
+      if (!appAuthStatusCache.authenticated || !window.__sgpCloud || !window.__sgpCloud.warehouse) return;
+      if (sharedSyncState.inFlight) {
+        sharedSyncState.dirty = true;
+        return;
+      }
+      sharedSyncState.inFlight = true;
+      sharedSyncState.dirty = false;
+      try {
+        var localSnap = buildSharedSnapshotFromLocal();
+        var baseRev = sharedSyncState.revision;
+        var res = await window.__sgpCloud.warehouse.saveState(
+          {
+            baseRevision: baseRev,
+            warehousesMeta: localSnap.warehousesMeta,
+            warehouses: localSnap.warehouses
+          },
+          appAuthToken || null
+        );
+
+        if (res && res.conflict && res.latest) {
+          var merged = mergeSnapshots3Way(sharedSyncState.snapshot, localSnap, res.latest);
+          applySharedStateLocally({
+            revision: res.latest.revision,
+            warehousesMeta: merged.warehousesMeta,
+            warehouses: merged.warehouses
+          });
+          var retryRes = await window.__sgpCloud.warehouse.saveState(
+            {
+              baseRevision: res.latest.revision,
+              warehousesMeta: merged.warehousesMeta,
+              warehouses: merged.warehouses
+            },
+            appAuthToken || null
+          );
+          if (retryRes && retryRes.ok) {
+            sharedSyncState.revision = Number(retryRes.revision || 0);
+            sharedSyncState.snapshot = cloneJsonSafe(buildSharedSnapshotFromLocal());
+            if (retryRes.storageMode) sharedSyncState.storageMode = retryRes.storageMode;
+          }
+          triggerRenderOrDefer();
+        } else if (res && res.ok) {
+          sharedSyncState.revision = Number(res.revision || 0);
+          sharedSyncState.snapshot = cloneJsonSafe(localSnap);
+          if (res.storageMode) sharedSyncState.storageMode = res.storageMode;
+        }
+      } catch (err) {
+        console.error('Sinkronisasi data gudang gagal:', err);
+      } finally {
+        sharedSyncState.inFlight = false;
+        if (sharedSyncState.dirty) {
+          scheduleSharedSyncPush();
+        }
+      }
+    }
+
+    async function pullSharedWarehouseState(isInitialOrManual) {
+      if (!appAuthStatusCache.authenticated || !window.__sgpCloud || !window.__sgpCloud.warehouse) return;
+      if (sharedSyncState.inFlight || sharedSyncState.dirty || sharedSyncState.pushTimer) return;
+      sharedSyncState.inFlight = true;
+      try {
+        var sinceParam = isInitialOrManual === 'manual' ? null : sharedSyncState.revision;
+        var res = await window.__sgpCloud.warehouse.getState(sinceParam, appAuthToken || null);
+        if (res && res.storageMode) {
+          sharedSyncState.storageMode = res.storageMode;
+        }
+        if (!res) return;
+
+        if (Number(res.revision || 0) === 0) {
+          var localSnap = buildSharedSnapshotFromLocal();
+          if (!isSharedSnapshotEmpty(localSnap)) {
+            sharedSyncState.inFlight = false;
+            await pushSharedWarehouseState();
+            return;
+          }
+          sharedSyncState.revision = 0;
+          sharedSyncState.snapshot = cloneJsonSafe(localSnap);
+          return;
+        }
+
+        if (res.changed && Number(res.revision || 0) !== sharedSyncState.revision) {
+          var wasInitialized = sharedSyncState.revision > 0;
+          applySharedStateLocally(res);
+          triggerRenderOrDefer();
+          if (wasInitialized && res.updatedBy && res.updatedBy !== appAuthEmail) {
+            showToast('Data diperbarui oleh ' + res.updatedBy, 'info');
+          } else if (isInitialOrManual === 'manual') {
+            showToast('Data terbaru berhasil disinkronkan', 'ok');
+          }
+        } else if (isInitialOrManual === 'manual') {
+          showToast('Data sudah versi terbaru', 'ok');
+        }
+      } catch (err) {
+        if (isInitialOrManual === 'manual') {
+          showToast((err && err.message) || 'Gagal menyinkronkan data', 'err');
+        }
+      } finally {
+        sharedSyncState.inFlight = false;
+        if (sharedSyncState.dirty) {
+          scheduleSharedSyncPush();
+        }
+      }
+    }
+
+    function scheduleSharedSyncPush() {
+      if (!appAuthStatusCache.authenticated) return;
+      sharedSyncState.dirty = true;
+      if (sharedSyncState.pushTimer) clearTimeout(sharedSyncState.pushTimer);
+      sharedSyncState.pushTimer = setTimeout(function () {
+        sharedSyncState.pushTimer = null;
+        void pushSharedWarehouseState();
+      }, 350);
+    }
+
+    function startSharedSyncLoop() {
+      stopSharedSyncLoop(false);
+      sharedSyncState.pollTimer = setInterval(function () {
+        if (document.hidden || !appAuthStatusCache.authenticated) return;
+        void pullSharedWarehouseState(false);
+      }, 3000);
+      void pullSharedWarehouseState(true);
+    }
+
+    function stopSharedSyncLoop(resetState) {
+      if (sharedSyncState.pollTimer) {
+        clearInterval(sharedSyncState.pollTimer);
+        sharedSyncState.pollTimer = null;
+      }
+      if (sharedSyncState.pushTimer) {
+        clearTimeout(sharedSyncState.pushTimer);
+        sharedSyncState.pushTimer = null;
+      }
+      if (resetState) {
+        sharedSyncState.revision = 0;
+        sharedSyncState.snapshot = null;
+        sharedSyncState.dirty = false;
+        sharedSyncState.pendingRender = false;
+      }
+    }
+
+    function writeWarehouseData(wid, data, skipSync) {
       var p = whPrefix(wid);
       FIELDS.forEach(function (f) {
         safeSet(p + f, data[f]);
       });
       safeSet(p + 'updatedAt', Date.now());
-      scheduleCloudPush(wid);
+      if (!skipSync) {
+        scheduleSharedSyncPush();
+      }
     }
 
-    function deleteWarehouseStorage(wid) {
+    function deleteWarehouseStorage(wid, skipSync) {
       var p = whPrefix(wid);
       FIELDS.forEach(function (f) {
         safeDel(p + f);
       });
+      if (!skipSync) {
+        scheduleSharedSyncPush();
+      }
     }
 
     function curData() {
@@ -10364,7 +10711,7 @@
           var val = inp.value.trim();
           if (!val) { inp.value = getWhMeta(id).nama; return; }
           W.list.forEach(function (w) { if (w.id === id) w.nama = val; });
-          saveRegistry();
+          saveRegistry(true);
           showToast('Nama gudang diperbarui', 'ok');
           renderApp();
         });
@@ -10389,9 +10736,9 @@
             '<p style="margin:0">Yakin ingin menghapus gudang <strong>' + esc(meta.nama) + '</strong> beserta seluruh stok dan transaksinya?</p>',
             function () {
               W.list = W.list.filter(function (w) { return w.id !== id; });
-              deleteWarehouseStorage(id);
+              deleteWarehouseStorage(id, true);
               if (W.cur === id) W.cur = W.list[0].id;
-              saveRegistry();
+              saveRegistry(true);
               showToast('Gudang ' + meta.nama + ' dihapus', 'ok');
               renderApp();
             },
@@ -10420,7 +10767,7 @@
 
         W.list.push({ id: newId, nama: nama, legacy: false });
         W.cur = newId;
-        saveRegistry();
+        saveRegistry(true);
         writeWarehouseData(newId, newData);
         showToast('Gudang baru "' + nama + '" ditambahkan dan diaktifkan', 'ok');
         renderApp();
@@ -10626,6 +10973,11 @@
       if (settingsTab === 'role') {
         var pinConfigured = !!pinStatusCache.configured;
         var activeRoleNow = getEffectiveRole();
+        var storageLabel = sharedSyncState.storageMode === 'redis'
+          ? 'Redis / Vercel KV (Sinkron Lintas Perangkat)'
+          : (sharedSyncState.storageMode === 'ephemeral'
+              ? 'Serverless Sementara (Pasang Vercel KV / Upstash agar data & akun tersimpan lintas perangkat)'
+              : 'File Server Persisten (Sinkron Lintas Perangkat)');
 
         html += '<div class="grid-2">' +
           '<div class="card"><div class="card-header"><h2 class="card-title">Sesi Login &amp; Hak Akses</h2>' +
@@ -10633,10 +10985,14 @@
           '<div class="inline-alert info" style="margin-bottom:14px">' +
           'Setiap pengguna yang masuk melalui email &amp; password otomatis memulai sesi sebagai <strong>Stockkeeper</strong>. Akses <strong>Admin</strong> dan <strong>Super Admin</strong> hanya dapat dibuka dengan memasukkan PIN.' +
           '</div>' +
+          (!sharedSyncState.hasSessionSecret
+            ? '<div class="inline-alert warn" style="margin-bottom:12px;font-size:12.5px">Tambahkan <code>PIN_SESSION_SECRET</code> (min. 16 karakter) di Environment Variables server/Vercel agar sesi login stabil di semua instance.</div>'
+            : '') +
           '<div style="display:flex;flex-direction:column;gap:8px;font-size:13px">' +
           '<div><span class="muted">Email Login Aktif:</span> <strong>' + esc(appAuthEmail || W.user || '-') + '</strong></div>' +
           '<div><span class="muted">Role Default Setelah Login:</span> <strong>Stockkeeper</strong></div>' +
           '<div><span class="muted">Status Sesi PIN:</span> <strong>' + (pinSessionToken && pinSessionRole ? ('Terbuka (' + esc(ROLE_LABELS[pinSessionRole]) + ')') : 'Terkunci (Stockkeeper)') + '</strong></div>' +
+          '<div><span class="muted">Mode Penyimpanan Server:</span> <strong>' + esc(storageLabel) + '</strong> (Revisi #' + esc(sharedSyncState.revision) + ')</div>' +
           '</div>' +
           (pinSessionToken ? '<div style="margin-top:14px"><button type="button" class="btn btn-danger" id="session-lock-btn">Kunci Akses PIN &amp; Kembali ke Stockkeeper</button></div>' : '') +
           '</div>';
@@ -10662,6 +11018,20 @@
             '</div></form>';
         }
         html += '</div></div>';
+
+        html += '<div class="card" style="margin-top:14px"><div class="card-header">' +
+          '<h2 class="card-title">Akun Operator (Multi-User &amp; Multi-Device)</h2>' +
+          '<span class="badge badge-info">Masuk sebagai Stockkeeper</span></div>' +
+          '<p class="muted" style="margin-top:0;font-size:12.5px">Tambahkan akun email &amp; password berbeda untuk masing-masing petugas gudang. Semua akun operator berbagi data gudang yang sama secara langsung.</p>' +
+          '<div class="grid-2">' +
+          '<form id="form-add-operator-user">' +
+          '<div class="field" style="margin-bottom:10px"><label for="op-email">Email Operator</label><input id="op-email" type="email" class="input" required placeholder="operator@scarlett.id" autocomplete="off" /></div>' +
+          '<div class="field" style="margin-bottom:10px"><label for="op-name">Nama Operator</label><input id="op-name" type="text" class="input" maxlength="80" placeholder="Mis. Budi / Shift Malam" /></div>' +
+          '<div class="field" style="margin-bottom:14px"><label for="op-password">Password (min. 6 karakter)</label><input id="op-password" type="password" class="input" required minlength="6" maxlength="128" autocomplete="new-password" placeholder="Masukkan password operator" /></div>' +
+          '<button type="submit" class="btn btn-primary">Tambah / Perbarui Akun Operator</button>' +
+          '</form>' +
+          '<div><div id="operator-users-list"><p class="muted" style="font-size:13px;margin:0">Memuat daftar akun…</p></div></div>' +
+          '</div></div>';
 
         root.innerHTML = html;
 
@@ -10730,7 +11100,85 @@
           });
         }
 
+        async function loadAndRenderOperatorUsers() {
+          var box = document.getElementById('operator-users-list');
+          if (!box || !window.__sgpCloud || !window.__sgpCloud.appAuth) return;
+          if (!pinSessionToken) {
+            box.innerHTML = '<div class="inline-alert warn" style="font-size:12.5px">Aktifkan sesi PIN Super Admin terlebih dahulu untuk melihat dan mengelola akun operator.</div>';
+            return;
+          }
+          try {
+            var data = await window.__sgpCloud.appAuth.listUsers(pinSessionToken || null, appAuthToken || null);
+            var rowsHtml = '';
+            if (data.primaryEmail) {
+              rowsHtml += '<tr><td><strong>' + esc(data.primaryEmail) + '</strong></td><td>Akun Utama</td><td>' +
+                (data.primarySource === 'env' ? '<span class="badge badge-info">Env Server</span>' : '<span class="badge badge-ok">Utama</span>') +
+                '</td><td></td></tr>';
+            }
+            (data.envUsers || []).forEach(function (u) {
+              rowsHtml += '<tr><td>' + esc(u.email) + '</td><td>' + esc(u.name || '-') + '</td><td><span class="badge badge-info">Env Server</span></td><td></td></tr>';
+            });
+            (data.users || []).forEach(function (u) {
+              rowsHtml += '<tr><td>' + esc(u.email) + '</td><td>' + esc(u.name || '-') + '</td><td><span class="badge badge-ok">Aktif</span></td>' +
+                '<td class="right"><button type="button" class="btn btn-sm btn-danger" data-del-op="' + esc(u.email) + '">Hapus</button></td></tr>';
+            });
+            if (!rowsHtml) {
+              box.innerHTML = '<p class="muted" style="font-size:13px;margin:0">Belum ada akun operator tambahan.</p>';
+              return;
+            }
+            box.innerHTML = '<div class="table-wrap" style="max-height:240px"><table><thead><tr><th>Email</th><th>Nama</th><th>Sumber</th><th></th></tr></thead><tbody>' +
+              rowsHtml + '</tbody></table></div>';
+            box.querySelectorAll('[data-del-op]').forEach(function (btn) {
+              btn.addEventListener('click', function () {
+                var targetEmail = btn.getAttribute('data-del-op');
+                if (!targetEmail) return;
+                confirmDialog(
+                  'Hapus Akun Operator',
+                  '<p style="margin:0">Cabut akses login untuk <strong>' + esc(targetEmail) + '</strong>?</p>',
+                  async function () {
+                    try {
+                      await window.__sgpCloud.appAuth.deleteUser(targetEmail, pinSessionToken || null, appAuthToken || null);
+                      showToast('Akun operator dihapus: ' + targetEmail, 'ok');
+                      void loadAndRenderOperatorUsers();
+                    } catch (err) {
+                      showToast((err && err.message) || 'Gagal menghapus akun operator', 'err');
+                    }
+                  },
+                  true
+                );
+              });
+            });
+          } catch (err) {
+            box.innerHTML = '<div class="inline-alert err" style="font-size:12.5px">' + esc((err && err.message) || 'Gagal memuat daftar akun operator') + '</div>';
+          }
+        }
+
+        var addOpForm = document.getElementById('form-add-operator-user');
+        if (addOpForm) {
+          addOpForm.addEventListener('submit', async function (e) {
+            e.preventDefault();
+            var emailVal = document.getElementById('op-email').value.trim();
+            var nameVal = document.getElementById('op-name').value.trim();
+            var pwVal = document.getElementById('op-password').value;
+            try {
+              await window.__sgpCloud.appAuth.saveUser(
+                { email: emailVal, name: nameVal, password: pwVal },
+                pinSessionToken || null,
+                appAuthToken || null
+              );
+              document.getElementById('op-email').value = '';
+              document.getElementById('op-name').value = '';
+              document.getElementById('op-password').value = '';
+              showToast('Akun operator disimpan: ' + emailVal, 'ok');
+              void loadAndRenderOperatorUsers();
+            } catch (err) {
+              showToast((err && err.message) || 'Gagal menyimpan akun operator', 'err');
+            }
+          });
+        }
+
         refreshPinStatus();
+        void loadAndRenderOperatorUsers();
         return;
       }
 
@@ -10881,7 +11329,7 @@
               var obj = JSON.parse(raw);
               if (obj && obj.W && obj.warehouses && Array.isArray(obj.W.list) && obj.W.list.length > 0) {
                 W = obj.W;
-                saveRegistry();
+                saveRegistry(true);
                 W.list.forEach(function (w) {
                   if (obj.warehouses[w.id]) {
                     writeWarehouseData(w.id, Object.assign(defaultWhData(), obj.warehouses[w.id]));
@@ -10989,6 +11437,13 @@
     });
 
     document.getElementById('theme-toggle').addEventListener('click', cycleTheme);
+    var cloudSyncBtn = document.getElementById('cloud-sync-btn');
+    if (cloudSyncBtn) {
+      cloudSyncBtn.addEventListener('click', function () {
+        if (!appAuthStatusCache.authenticated) return;
+        void pullSharedWarehouseState('manual');
+      });
+    }
     document.getElementById('banner-backup-btn').addEventListener('click', function () {
       if (getEffectiveRole() === 'super_admin') {
         settingsTab = 'master';
@@ -11077,6 +11532,7 @@
     // === GERBANG LOGIN EMAIL & PASSWORD BIASA ===
     function setAuthUnlockedState(unlocked, email, role) {
       appAuthStatusCache.authenticated = Boolean(unlocked);
+      var syncBtn = document.getElementById('cloud-sync-btn');
       if (unlocked) {
         appAuthEmail = String(email || '').trim();
         appAuthSessionRole = normalizeAppRole(role || 'stockkeeper');
@@ -11087,10 +11543,13 @@
         document.body.classList.remove('auth-locked');
         var logoutBtn = document.getElementById('app-logout-btn');
         if (logoutBtn) logoutBtn.style.display = '';
+        if (syncBtn) syncBtn.style.display = '';
         currentTab = defaultTabForRole(getEffectiveRole());
         renderApp();
         refreshPinStatus();
+        startSharedSyncLoop();
       } else {
+        stopSharedSyncLoop(true);
         appAuthToken = '';
         appAuthEmail = '';
         appAuthSessionRole = null;
@@ -11100,6 +11559,7 @@
         document.body.classList.add('auth-locked');
         var logoutBtnHide = document.getElementById('app-logout-btn');
         if (logoutBtnHide) logoutBtnHide.style.display = 'none';
+        if (syncBtn) syncBtn.style.display = 'none';
       }
     }
 
@@ -11246,6 +11706,8 @@
             throw new Error('Server autentikasi tidak merespons dengan benar (HTTP ' + res.status + '). Coba muat ulang halaman.');
           }
           var st = await res.json();
+          if (st && st.storageMode) sharedSyncState.storageMode = st.storageMode;
+          if (st && typeof st.hasSessionSecret === 'boolean') sharedSyncState.hasSessionSecret = st.hasSessionSecret;
           var prevConfigured = appAuthStatusCache.configured;
           appAuthStatusCache = {
             loaded: true,
@@ -11299,9 +11761,27 @@
         });
       }
 
+      document.addEventListener('focusout', function () {
+        if (!sharedSyncState.pendingRender) return;
+        setTimeout(function () {
+          if (sharedSyncState.pendingRender && !isUserEditingFormInView()) {
+            sharedSyncState.pendingRender = false;
+            renderApp();
+          }
+        }, 120);
+      });
+
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden && appAuthStatusCache.authenticated) {
+          void pullSharedWarehouseState(false);
+        }
+      });
+
       window.addEventListener('focus', function () {
         if (!appAuthStatusCache.authenticated) {
           void syncAppAuthStatus(true);
+        } else {
+          void pullSharedWarehouseState(false);
         }
       });
 

@@ -1,11 +1,12 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import express, { type Request, type Response } from 'express';
+import express, { type NextFunction, type Request, type RequestHandler, type Response } from 'express';
 import { z } from 'zod';
 
 type AppRole = 'admin' | 'super_admin';
 type AppAuthRole = 'stockkeeper' | AppRole;
+export type StorageMode = 'redis' | 'file' | 'ephemeral';
 
 interface StoredPinRecord {
   adminHash: string;
@@ -17,6 +18,34 @@ interface StoredAuthRecord {
   email: string;
   passwordHash: string;
   updatedAt: string;
+}
+
+interface StoredOperatorUser {
+  email: string;
+  name: string;
+  passwordHash: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface EnvOperatorUser {
+  email: string;
+  password: string;
+  name: string;
+}
+
+interface WarehouseMetaRecord {
+  id: string;
+  nama: string;
+  legacy?: boolean;
+}
+
+interface SharedWarehouseState {
+  revision: number;
+  updatedAt: number;
+  updatedBy: string;
+  warehousesMeta: WarehouseMetaRecord[];
+  warehouses: Record<string, Record<string, unknown>>;
 }
 
 interface PinSessionPayload {
@@ -39,7 +68,48 @@ const MAX_ATTEMPTS = 10;
 const ephemSessionSecret = crypto.randomBytes(32);
 let memoryPinStore: StoredPinRecord | null = null;
 let memoryAuthStore: StoredAuthRecord | null = null;
+let memoryOperatorUsers: StoredOperatorUser[] | null = null;
+let memoryWarehouseState: SharedWarehouseState | null = null;
 const failedAttempts = new Map<string, { count: number; resetAt: number }>();
+
+const DEFAULT_WAREHOUSE_STATE: SharedWarehouseState = {
+  revision: 0,
+  updatedAt: 0,
+  updatedBy: '',
+  warehousesMeta: [],
+  warehouses: {},
+};
+
+function asyncHandler(
+  fn: (req: Request, res: Response, next: NextFunction) => Promise<void> | void
+): RequestHandler {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
+
+function getKvConfig(): { url: string; token: string } | null {
+  const rawUrl = String(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').trim();
+  const rawToken = String(process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+  if (!rawUrl || !rawToken) return null;
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:') return null;
+    return { url: parsed.toString().replace(/\/+$/, ''), token: rawToken };
+  } catch {
+    return null;
+  }
+}
+
+function getStorageMode(): StorageMode {
+  if (getKvConfig()) return 'redis';
+  if (process.env.VERCEL) return 'ephemeral';
+  return 'file';
+}
+
+function hasStrongSessionSecret(): boolean {
+  return String(process.env.PIN_SESSION_SECRET || '').trim().length >= 16;
+}
 
 function getSessionSecret(): Buffer {
   const configured = String(process.env.PIN_SESSION_SECRET || '').trim();
@@ -47,6 +117,94 @@ function getSessionSecret(): Buffer {
     return crypto.createHash('sha256').update(configured, 'utf8').digest();
   }
   return ephemSessionSecret;
+}
+
+async function kvGetJson<T>(key: string): Promise<{ hit: boolean; value: T | null }> {
+  const kv = getKvConfig();
+  if (!kv) return { hit: false, value: null };
+  try {
+    const res = await fetch(`${kv.url}/get/${encodeURIComponent(key)}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${kv.token}`,
+      },
+      cache: 'no-store',
+    });
+    if (!res.ok) return { hit: false, value: null };
+    const payload = (await res.json()) as { result?: unknown };
+    if (payload.result === null || payload.result === undefined) {
+      return { hit: true, value: null };
+    }
+    if (typeof payload.result === 'string') {
+      return { hit: true, value: JSON.parse(payload.result) as T };
+    }
+    return { hit: true, value: payload.result as T };
+  } catch {
+    return { hit: false, value: null };
+  }
+}
+
+async function kvSetJson(key: string, value: unknown): Promise<boolean> {
+  const kv = getKvConfig();
+  if (!kv) return false;
+  try {
+    const res = await fetch(`${kv.url}/set/${encodeURIComponent(key)}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${kv.token}`,
+        'Content-Type': 'text/plain; charset=utf-8',
+      },
+      body: JSON.stringify(value),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+function resolveDataPaths(primaryFilename: string, tmpFilename: string): [string, string] {
+  const baseDir = path.resolve(process.cwd(), '.data');
+  const primary = path.resolve(baseDir, primaryFilename);
+  if (!primary.startsWith(baseDir + path.sep)) {
+    throw new Error('Invalid storage path');
+  }
+  const tmpBase = path.resolve('/tmp');
+  const tmpPath = path.resolve(tmpBase, tmpFilename);
+  if (!tmpPath.startsWith(tmpBase + path.sep)) {
+    throw new Error('Invalid temporary storage path');
+  }
+  return [primary, tmpPath];
+}
+
+function readJsonFromPaths<T>(primaryFilename: string, tmpFilename: string): T | null {
+  const paths = resolveDataPaths(primaryFilename, tmpFilename);
+  for (const filePath of paths) {
+    try {
+      if (!fs.existsSync(filePath)) continue;
+      const raw = fs.readFileSync(filePath, 'utf8');
+      return JSON.parse(raw) as T;
+    } catch {
+      // Ignore unreadable or non-persistent path
+    }
+  }
+  return null;
+}
+
+function writeJsonToPaths(primaryFilename: string, tmpFilename: string, value: unknown): void {
+  const [primaryPath, tmpPath] = resolveDataPaths(primaryFilename, tmpFilename);
+  const serialized = JSON.stringify(value);
+  try {
+    fs.mkdirSync(path.dirname(primaryPath), { recursive: true });
+    fs.writeFileSync(primaryPath, serialized, { mode: 0o600 });
+    return;
+  } catch {
+    // Fallback to /tmp on read-only serverless filesystems
+  }
+  try {
+    fs.writeFileSync(tmpPath, serialized, { mode: 0o600 });
+  } catch {
+    // Keep in-memory copy if filesystem is locked
+  }
 }
 
 function getEnvPins(): { adminPin: string; superAdminPin: string } | null {
@@ -58,31 +216,11 @@ function getEnvPins(): { adminPin: string; superAdminPin: string } | null {
   return null;
 }
 
-function resolvePinStorePath(): string {
-  const baseDir = path.resolve(process.cwd(), '.data');
-  const candidate = path.resolve(baseDir, 'pin-config.json');
-  if (!candidate.startsWith(baseDir + path.sep)) {
-    throw new Error('Invalid PIN storage path');
-  }
-  return candidate;
-}
-
-function resolveTmpPinStorePath(): string {
-  const baseDir = path.resolve('/tmp');
-  const candidate = path.resolve(baseDir, 'sgp-pin-config.json');
-  if (!candidate.startsWith(baseDir + path.sep)) {
-    throw new Error('Invalid temporary PIN storage path');
-  }
-  return candidate;
-}
-
-function readStoredPins(): StoredPinRecord | null {
-  if (memoryPinStore) return memoryPinStore;
-  for (const filePath of [resolvePinStorePath(), resolveTmpPinStorePath()]) {
-    try {
-      if (!fs.existsSync(filePath)) continue;
-      const raw = fs.readFileSync(filePath, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<StoredPinRecord>;
+async function readStoredPins(): Promise<StoredPinRecord | null> {
+  if (getKvConfig()) {
+    const kvRes = await kvGetJson<Partial<StoredPinRecord>>('sgp:pin:config');
+    if (kvRes.hit) {
+      const parsed = kvRes.value;
       if (
         parsed &&
         typeof parsed.adminHash === 'string' &&
@@ -97,11 +235,35 @@ function readStoredPins(): StoredPinRecord | null {
         };
         return memoryPinStore;
       }
-    } catch {
-      // Ignore unreadable or non-persistent path
+      memoryPinStore = null;
+      return null;
     }
   }
+  if (memoryPinStore) return memoryPinStore;
+  const parsed = readJsonFromPaths<Partial<StoredPinRecord>>('pin-config.json', 'sgp-pin-config.json');
+  if (
+    parsed &&
+    typeof parsed.adminHash === 'string' &&
+    typeof parsed.superAdminHash === 'string' &&
+    parsed.adminHash.includes(':') &&
+    parsed.superAdminHash.includes(':')
+  ) {
+    memoryPinStore = {
+      adminHash: parsed.adminHash,
+      superAdminHash: parsed.superAdminHash,
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
+    };
+    return memoryPinStore;
+  }
   return null;
+}
+
+async function writeStoredPins(record: StoredPinRecord): Promise<void> {
+  memoryPinStore = record;
+  if (getKvConfig()) {
+    await kvSetJson('sgp:pin:config', record);
+  }
+  writeJsonToPaths('pin-config.json', 'sgp-pin-config.json', record);
 }
 
 function getEnvAuth(): { email: string; password: string } | null {
@@ -113,31 +275,35 @@ function getEnvAuth(): { email: string; password: string } | null {
   return null;
 }
 
-function resolveAuthStorePath(): string {
-  const baseDir = path.resolve(process.cwd(), '.data');
-  const candidate = path.resolve(baseDir, 'auth-config.json');
-  if (!candidate.startsWith(baseDir + path.sep)) {
-    throw new Error('Invalid auth storage path');
+function getEnvUsers(): EnvOperatorUser[] {
+  const raw = String(process.env.APP_USERS_JSON || '').trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set<string>();
+    const out: EnvOperatorUser[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const rec = item as Record<string, unknown>;
+      const email = String(rec.email || '').trim().toLowerCase();
+      const password = String(rec.password || '').replace(/[\r\n]+/g, '');
+      const name = String(rec.name || '').trim() || email.split('@')[0] || 'Operator';
+      if (!email.includes('@') || password.length < 6 || seen.has(email)) continue;
+      seen.add(email);
+      out.push({ email, password, name });
+    }
+    return out;
+  } catch {
+    return [];
   }
-  return candidate;
 }
 
-function resolveTmpAuthStorePath(): string {
-  const baseDir = path.resolve('/tmp');
-  const candidate = path.resolve(baseDir, 'sgp-auth-config.json');
-  if (!candidate.startsWith(baseDir + path.sep)) {
-    throw new Error('Invalid temporary auth storage path');
-  }
-  return candidate;
-}
-
-function readStoredAuth(): StoredAuthRecord | null {
-  if (memoryAuthStore) return memoryAuthStore;
-  for (const filePath of [resolveAuthStorePath(), resolveTmpAuthStorePath()]) {
-    try {
-      if (!fs.existsSync(filePath)) continue;
-      const raw = fs.readFileSync(filePath, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<StoredAuthRecord>;
+async function readStoredAuth(): Promise<StoredAuthRecord | null> {
+  if (getKvConfig()) {
+    const kvRes = await kvGetJson<Partial<StoredAuthRecord>>('sgp:auth:primary');
+    if (kvRes.hit) {
+      const parsed = kvRes.value;
       if (
         parsed &&
         typeof parsed.email === 'string' &&
@@ -152,64 +318,155 @@ function readStoredAuth(): StoredAuthRecord | null {
         };
         return memoryAuthStore;
       }
-    } catch {
-      // Ignore unreadable or non-persistent path
+      memoryAuthStore = null;
+      return null;
     }
+  }
+  if (memoryAuthStore) return memoryAuthStore;
+  const parsed = readJsonFromPaths<Partial<StoredAuthRecord>>('auth-config.json', 'sgp-auth-config.json');
+  if (
+    parsed &&
+    typeof parsed.email === 'string' &&
+    parsed.email.includes('@') &&
+    typeof parsed.passwordHash === 'string' &&
+    parsed.passwordHash.includes(':')
+  ) {
+    memoryAuthStore = {
+      email: parsed.email.trim().toLowerCase(),
+      passwordHash: parsed.passwordHash,
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
+    };
+    return memoryAuthStore;
   }
   return null;
 }
 
-function writeStoredAuth(record: StoredAuthRecord): void {
+async function writeStoredAuth(record: StoredAuthRecord): Promise<void> {
   memoryAuthStore = record;
-  const serialized = JSON.stringify(record, null, 2);
-  const primaryPath = resolveAuthStorePath();
-  try {
-    fs.mkdirSync(path.dirname(primaryPath), { recursive: true });
-    fs.writeFileSync(primaryPath, serialized, { mode: 0o600 });
-    return;
-  } catch {
-    // Fallback to /tmp on read-only serverless filesystems
+  if (getKvConfig()) {
+    await kvSetJson('sgp:auth:primary', record);
   }
-  try {
-    const tmpPath = resolveTmpAuthStorePath();
-    fs.writeFileSync(tmpPath, serialized, { mode: 0o600 });
-  } catch {
-    // Keep in-memory copy if filesystem is locked
-  }
+  writeJsonToPaths('auth-config.json', 'sgp-auth-config.json', record);
 }
 
-function writeStoredPins(record: StoredPinRecord): void {
-  memoryPinStore = record;
-  const serialized = JSON.stringify(record, null, 2);
-  const primaryPath = resolvePinStorePath();
-  try {
-    fs.mkdirSync(path.dirname(primaryPath), { recursive: true });
-    fs.writeFileSync(primaryPath, serialized, { mode: 0o600 });
-    return;
-  } catch {
-    // Fallback to /tmp on read-only serverless filesystems
+function sanitizeOperatorUsers(raw: unknown): StoredOperatorUser[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: StoredOperatorUser[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Partial<StoredOperatorUser>;
+    const email = typeof rec.email === 'string' ? rec.email.trim().toLowerCase() : '';
+    const passwordHash = typeof rec.passwordHash === 'string' ? rec.passwordHash : '';
+    if (!email.includes('@') || !passwordHash.includes(':') || seen.has(email)) continue;
+    seen.add(email);
+    const now = new Date().toISOString();
+    out.push({
+      email,
+      name: typeof rec.name === 'string' && rec.name.trim() ? rec.name.trim() : email.split('@')[0],
+      passwordHash,
+      createdAt: typeof rec.createdAt === 'string' ? rec.createdAt : now,
+      updatedAt: typeof rec.updatedAt === 'string' ? rec.updatedAt : now,
+    });
   }
-  try {
-    const tmpPath = resolveTmpPinStorePath();
-    fs.writeFileSync(tmpPath, serialized, { mode: 0o600 });
-  } catch {
-    // Keep in-memory copy if filesystem is completely locked
-  }
+  return out;
 }
 
-function hashPin(pin: string): string {
+async function readOperatorUsers(): Promise<StoredOperatorUser[]> {
+  if (getKvConfig()) {
+    const kvRes = await kvGetJson<unknown>('sgp:auth:users');
+    if (kvRes.hit) {
+      const cleaned = sanitizeOperatorUsers(kvRes.value);
+      memoryOperatorUsers = cleaned;
+      return cleaned;
+    }
+  }
+  if (memoryOperatorUsers) return memoryOperatorUsers;
+  const fromDisk = readJsonFromPaths<unknown>('operator-users.json', 'sgp-operator-users.json');
+  const cleaned = sanitizeOperatorUsers(fromDisk);
+  memoryOperatorUsers = cleaned;
+  return cleaned;
+}
+
+async function writeOperatorUsers(users: StoredOperatorUser[]): Promise<void> {
+  memoryOperatorUsers = users;
+  if (getKvConfig()) {
+    await kvSetJson('sgp:auth:users', users);
+  }
+  writeJsonToPaths('operator-users.json', 'sgp-operator-users.json', users);
+}
+
+function sanitizeWarehouseState(raw: unknown): SharedWarehouseState {
+  if (!raw || typeof raw !== 'object') {
+    return { ...DEFAULT_WAREHOUSE_STATE };
+  }
+  const obj = raw as Partial<SharedWarehouseState>;
+  const revision =
+    typeof obj.revision === 'number' && Number.isFinite(obj.revision) && obj.revision >= 0
+      ? Math.floor(obj.revision)
+      : 0;
+  const updatedAt =
+    typeof obj.updatedAt === 'number' && Number.isFinite(obj.updatedAt) && obj.updatedAt >= 0
+      ? obj.updatedAt
+      : 0;
+  const updatedBy = typeof obj.updatedBy === 'string' ? obj.updatedBy : '';
+  const warehousesMeta: WarehouseMetaRecord[] = Array.isArray(obj.warehousesMeta)
+    ? obj.warehousesMeta
+        .filter((m): m is WarehouseMetaRecord => Boolean(m && typeof m.id === 'string' && typeof m.nama === 'string'))
+        .map((m) => ({
+          id: m.id.trim(),
+          nama: m.nama.trim(),
+          legacy: Boolean(m.legacy),
+        }))
+    : [];
+  const warehouses: Record<string, Record<string, unknown>> = {};
+  if (obj.warehouses && typeof obj.warehouses === 'object' && !Array.isArray(obj.warehouses)) {
+    for (const [wid, wdata] of Object.entries(obj.warehouses)) {
+      if (wdata && typeof wdata === 'object' && !Array.isArray(wdata)) {
+        warehouses[wid] = wdata as Record<string, unknown>;
+      }
+    }
+  }
+  return { revision, updatedAt, updatedBy, warehousesMeta, warehouses };
+}
+
+async function readSharedWarehouseState(): Promise<SharedWarehouseState> {
+  if (getKvConfig()) {
+    const kvRes = await kvGetJson<unknown>('sgp:warehouse:state');
+    if (kvRes.hit) {
+      const cleaned = sanitizeWarehouseState(kvRes.value);
+      memoryWarehouseState = cleaned;
+      return cleaned;
+    }
+  }
+  if (memoryWarehouseState) return memoryWarehouseState;
+  const fromDisk = readJsonFromPaths<unknown>('warehouse-state.json', 'sgp-warehouse-state.json');
+  const cleaned = sanitizeWarehouseState(fromDisk);
+  memoryWarehouseState = cleaned;
+  return cleaned;
+}
+
+async function writeSharedWarehouseState(state: SharedWarehouseState): Promise<void> {
+  memoryWarehouseState = state;
+  if (getKvConfig()) {
+    await kvSetJson('sgp:warehouse:state', state);
+  }
+  writeJsonToPaths('warehouse-state.json', 'sgp-warehouse-state.json', state);
+}
+
+function hashSecret(secret: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(pin, salt, 64).toString('hex');
+  const derived = crypto.scryptSync(secret, salt, 64).toString('hex');
   return `${salt}:${derived}`;
 }
 
-function verifyPinHash(pin: string, storedHash: string): boolean {
+function verifySecretHash(secret: string, storedHash: string): boolean {
   const parts = storedHash.split(':');
   if (parts.length !== 2) return false;
   const [salt, hexDigest] = parts;
   if (!salt || !hexDigest) return false;
   const expected = Buffer.from(hexDigest, 'hex');
-  const actual = crypto.scryptSync(pin, salt, 64);
+  const actual = crypto.scryptSync(secret, salt, 64);
   if (expected.length !== actual.length) return false;
   return crypto.timingSafeEqual(expected, actual);
 }
@@ -318,10 +575,28 @@ function extractAppAuthToken(req: Request): string | null {
   return extractBearerToken(req);
 }
 
-function isAppAuthSatisfied(req: Request): boolean {
-  const configured = Boolean(getEnvAuth() || readStoredAuth());
-  if (!configured) return true;
-  return Boolean(verifyAppAuthToken(extractAppAuthToken(req)));
+function extractPinToken(req: Request): string | null {
+  const custom = req.headers['x-pin-token'];
+  if (typeof custom === 'string' && custom.trim()) {
+    return custom.trim();
+  }
+  return extractBearerToken(req);
+}
+
+async function isAnyAuthConfigured(): Promise<boolean> {
+  if (getEnvAuth() || getEnvUsers().length > 0) return true;
+  if (await readStoredAuth()) return true;
+  const users = await readOperatorUsers();
+  return users.length > 0;
+}
+
+async function getAppAuthSessionIfAllowed(req: Request): Promise<{ satisfied: boolean; session: AppAuthSessionPayload | null }> {
+  const configured = await isAnyAuthConfigured();
+  const session = verifyAppAuthToken(extractAppAuthToken(req));
+  if (!configured) {
+    return { satisfied: true, session };
+  }
+  return { satisfied: Boolean(session), session };
 }
 
 function getClientKey(req: Request): string {
@@ -373,6 +648,29 @@ const appAuthCredsSchema = z.object({
 const appLoginSchema = z.object({
   email: z.string().trim().email('Format email tidak valid').max(254),
   password: z.string().min(1, 'Password wajib diisi').max(128),
+});
+
+const upsertOperatorSchema = z.object({
+  email: z.string().trim().email('Format email tidak valid').max(254),
+  name: z.string().trim().max(80).optional().default(''),
+  password: z.string().min(6, 'Password minimal 6 karakter').max(128),
+});
+
+const deleteOperatorSchema = z.object({
+  email: z.string().trim().email('Format email tidak valid').max(254),
+});
+
+const warehouseMetaSchema = z.object({
+  id: z.string().trim().min(1).max(64),
+  nama: z.string().trim().min(1).max(120),
+  legacy: z.boolean().optional(),
+});
+
+const saveWarehouseStateSchema = z.object({
+  baseRevision: z.number().int().min(0),
+  warehousesMeta: z.array(warehouseMetaSchema).min(1).max(50),
+  warehouses: z.record(z.string().trim().min(1).max(64), z.record(z.string(), z.unknown())),
+  forceOverwrite: z.boolean().optional(),
 });
 
 const csvLineSchema = z.object({
@@ -435,7 +733,7 @@ export function createApp() {
   const app = express();
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '4mb' }));
 
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -444,209 +742,436 @@ export function createApp() {
   });
 
   app.get('/api/health', (_req: Request, res: Response) => {
-    res.json({ ok: true, timestamp: new Date().toISOString() });
-  });
-
-  app.get('/api/auth/status', (req: Request, res: Response) => {
-    const envAuth = getEnvAuth();
-    const storedAuth = readStoredAuth();
-    const token = extractBearerToken(req);
-    const session = verifyAppAuthToken(token);
     res.json({
-      configured: Boolean(envAuth || storedAuth),
-      envManaged: Boolean(envAuth),
-      authenticated: Boolean(session),
-      email: session?.sub ?? null,
-      role: session?.role ?? null,
+      ok: true,
+      timestamp: new Date().toISOString(),
+      storageMode: getStorageMode(),
+      hasSessionSecret: hasStrongSessionSecret(),
     });
   });
 
-  app.post('/api/auth/setup', (req: Request, res: Response) => {
-    const envAuth = getEnvAuth();
-    if (envAuth) {
-      res.status(409).json({
-        error: 'Akun login dikelola melalui environment variable server (APP_LOGIN_EMAIL & APP_LOGIN_PASSWORD).',
-        envManaged: true,
+  app.get(
+    '/api/auth/status',
+    asyncHandler(async (req: Request, res: Response) => {
+      const envAuth = getEnvAuth();
+      const envUsers = getEnvUsers();
+      const storedAuth = await readStoredAuth();
+      const operatorUsers = await readOperatorUsers();
+      const token = extractAppAuthToken(req);
+      const session = verifyAppAuthToken(token);
+      res.json({
+        configured: Boolean(envAuth || envUsers.length > 0 || storedAuth || operatorUsers.length > 0),
+        envManaged: Boolean(envAuth),
+        authenticated: Boolean(session),
+        email: session?.sub ?? null,
+        role: session?.role ?? null,
+        storageMode: getStorageMode(),
+        hasSessionSecret: hasStrongSessionSecret(),
       });
-      return;
-    }
+    })
+  );
 
-    const existing = readStoredAuth();
-    if (existing) {
-      res.status(409).json({ error: 'Akun login awal sudah dibuat. Silakan langsung masuk.' });
-      return;
-    }
+  app.post(
+    '/api/auth/setup',
+    asyncHandler(async (req: Request, res: Response) => {
+      const envAuth = getEnvAuth();
+      if (envAuth) {
+        res.status(409).json({
+          error: 'Akun login dikelola melalui environment variable server (APP_LOGIN_EMAIL & APP_LOGIN_PASSWORD).',
+          envManaged: true,
+        });
+        return;
+      }
 
-    const parsed = appAuthCredsSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.issues[0]?.message || 'Email atau password tidak valid.' });
-      return;
-    }
+      const existing = await readStoredAuth();
+      if (existing) {
+        res.status(409).json({ error: 'Akun login awal sudah dibuat. Silakan langsung masuk.' });
+        return;
+      }
 
-    const emailLower = parsed.data.email.trim().toLowerCase();
-    writeStoredAuth({
-      email: emailLower,
-      passwordHash: hashPin(parsed.data.password),
-      updatedAt: new Date().toISOString(),
-    });
+      const parsed = appAuthCredsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.issues[0]?.message || 'Email atau password tidak valid.' });
+        return;
+      }
 
-    res.json(issueAppAuthToken(emailLower, 'stockkeeper'));
-  });
-
-  app.post('/api/auth/login', (req: Request, res: Response) => {
-    const parsed = appLoginSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.issues[0]?.message || 'Email atau password tidak valid.' });
-      return;
-    }
-
-    const rateKey = `${getClientKey(req)}:app_login`;
-    if (isRateLimited(rateKey)) {
-      res.status(429).json({
-        error: 'Terlalu banyak percobaan login gagal. Tunggu 5 menit sebelum mencoba lagi.',
+      const emailLower = parsed.data.email.trim().toLowerCase();
+      await writeStoredAuth({
+        email: emailLower,
+        passwordHash: hashSecret(parsed.data.password),
+        updatedAt: new Date().toISOString(),
       });
-      return;
-    }
 
-    const emailLower = parsed.data.email.trim().toLowerCase();
-    const password = parsed.data.password;
+      res.json(issueAppAuthToken(emailLower, 'stockkeeper'));
+    })
+  );
 
-    const envAuth = getEnvAuth();
-    if (envAuth) {
-      const emailMatch = verifyPlainSecret(emailLower, envAuth.email);
-      const passMatch = verifyPlainSecret(password, envAuth.password);
-      if (!emailMatch || !passMatch) {
+  app.post(
+    '/api/auth/login',
+    asyncHandler(async (req: Request, res: Response) => {
+      const parsed = appLoginSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.issues[0]?.message || 'Email atau password tidak valid.' });
+        return;
+      }
+
+      const rateKey = `${getClientKey(req)}:app_login`;
+      if (isRateLimited(rateKey)) {
+        res.status(429).json({
+          error: 'Terlalu banyak percobaan login gagal. Tunggu 5 menit sebelum mencoba lagi.',
+        });
+        return;
+      }
+
+      const emailLower = parsed.data.email.trim().toLowerCase();
+      const password = parsed.data.password;
+
+      const envAuth = getEnvAuth();
+      const envUsers = getEnvUsers();
+      const storedAuth = await readStoredAuth();
+      const operatorUsers = await readOperatorUsers();
+
+      const hasAnyAccount = Boolean(envAuth || envUsers.length > 0 || storedAuth || operatorUsers.length > 0);
+      if (!hasAnyAccount) {
+        res.status(400).json({
+          needsSetup: true,
+          error: 'Akun login belum dikonfigurasi. Silakan buat akun login awal terlebih dahulu.',
+        });
+        return;
+      }
+
+      let matchedEmail: string | null = null;
+
+      if (envAuth && verifyPlainSecret(emailLower, envAuth.email) && verifyPlainSecret(password, envAuth.password)) {
+        matchedEmail = envAuth.email;
+      }
+
+      if (!matchedEmail) {
+        for (const u of envUsers) {
+          if (verifyPlainSecret(emailLower, u.email) && verifyPlainSecret(password, u.password)) {
+            matchedEmail = u.email;
+            break;
+          }
+        }
+      }
+
+      if (
+        !matchedEmail &&
+        storedAuth &&
+        verifyPlainSecret(emailLower, storedAuth.email) &&
+        verifySecretHash(password, storedAuth.passwordHash)
+      ) {
+        matchedEmail = storedAuth.email;
+      }
+
+      if (!matchedEmail) {
+        for (const u of operatorUsers) {
+          if (verifyPlainSecret(emailLower, u.email) && verifySecretHash(password, u.passwordHash)) {
+            matchedEmail = u.email;
+            break;
+          }
+        }
+      }
+
+      if (!matchedEmail) {
         recordFailure(rateKey);
         res.status(401).json({ error: 'Email atau password salah.' });
         return;
       }
+
       clearFailures(rateKey);
-      res.json(issueAppAuthToken(envAuth.email, 'stockkeeper'));
-      return;
-    }
-
-    const storedAuth = readStoredAuth();
-    if (!storedAuth) {
-      res.status(400).json({
-        needsSetup: true,
-        error: 'Akun login belum dikonfigurasi. Silakan buat akun login awal terlebih dahulu.',
-      });
-      return;
-    }
-
-    const emailMatch = verifyPlainSecret(emailLower, storedAuth.email);
-    const passMatch = verifyPinHash(password, storedAuth.passwordHash);
-    if (!emailMatch || !passMatch) {
-      recordFailure(rateKey);
-      res.status(401).json({ error: 'Email atau password salah.' });
-      return;
-    }
-
-    clearFailures(rateKey);
-    res.json(issueAppAuthToken(storedAuth.email, 'stockkeeper'));
-  });
+      res.json(issueAppAuthToken(matchedEmail, 'stockkeeper'));
+    })
+  );
 
   app.post('/api/auth/logout', (_req: Request, res: Response) => {
     res.json({ ok: true });
   });
 
-  app.get('/api/pin/status', (req: Request, res: Response) => {
-    const envPins = getEnvPins();
-    const stored = readStoredPins();
-    const token = extractBearerToken(req);
-    const session = isAppAuthSatisfied(req) ? verifySessionToken(token) : null;
-    res.json({
-      configured: Boolean(envPins || stored),
-      envManaged: Boolean(envPins),
-      hasAdminPin: Boolean(envPins || stored?.adminHash),
-      hasSuperAdminPin: Boolean(envPins || stored?.superAdminHash),
-      sessionValid: Boolean(session),
-      sessionRole: session?.role ?? null,
-    });
-  });
+  app.get(
+    '/api/auth/users',
+    asyncHandler(async (req: Request, res: Response) => {
+      const authState = await getAppAuthSessionIfAllowed(req);
+      if (!authState.satisfied) {
+        res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
+        return;
+      }
+      const pinSession = verifySessionToken(extractPinToken(req));
+      if (!pinSession || pinSession.role !== 'super_admin') {
+        res.status(403).json({ error: 'Hanya Super Admin yang dapat mengelola daftar akun operator.' });
+        return;
+      }
 
-  app.post('/api/pin/setup', (req: Request, res: Response) => {
-    if (!isAppAuthSatisfied(req)) {
-      res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
-      return;
-    }
+      const envAuth = getEnvAuth();
+      const envUsers = getEnvUsers();
+      const primaryStored = await readStoredAuth();
+      const operatorUsers = await readOperatorUsers();
 
-    const envPins = getEnvPins();
-    if (envPins) {
-      res.status(409).json({
-        error: 'PIN dikelola melalui environment variable server (ADMIN_BACKUP_PIN & SUPER_ADMIN_BACKUP_PIN).',
-        envManaged: true,
+      res.json({
+        storageMode: getStorageMode(),
+        primaryEmail: envAuth?.email || primaryStored?.email || null,
+        primarySource: envAuth ? 'env' : primaryStored ? 'stored' : null,
+        envUsers: envUsers.map((u) => ({ email: u.email, name: u.name, source: 'env' })),
+        users: operatorUsers.map((u) => ({
+          email: u.email,
+          name: u.name,
+          createdAt: u.createdAt,
+          updatedAt: u.updatedAt,
+          source: 'stored',
+        })),
       });
-      return;
-    }
+    })
+  );
 
-    const parsed = setupPinSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.issues[0]?.message || 'Format PIN tidak valid.' });
-      return;
-    }
+  app.post(
+    '/api/auth/users',
+    asyncHandler(async (req: Request, res: Response) => {
+      const authState = await getAppAuthSessionIfAllowed(req);
+      if (!authState.satisfied) {
+        res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
+        return;
+      }
+      const pinSession = verifySessionToken(extractPinToken(req));
+      if (!pinSession || pinSession.role !== 'super_admin') {
+        res.status(403).json({ error: 'Hanya Super Admin yang dapat menambah atau memperbarui akun operator.' });
+        return;
+      }
 
-    const { superAdminPin, adminPin, currentSuperAdminPin } = parsed.data;
-    if (superAdminPin === adminPin) {
-      res.status(400).json({ error: 'PIN Super Admin dan PIN Admin tidak boleh sama.' });
-      return;
-    }
+      const parsed = upsertOperatorSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.issues[0]?.message || 'Data akun operator tidak valid.' });
+        return;
+      }
 
-    const existing = readStoredPins();
-    if (existing) {
-      const token = extractBearerToken(req);
-      const session = verifySessionToken(token);
-      const hasValidSession = session?.role === 'super_admin';
-      const hasValidCurrentPin =
-        typeof currentSuperAdminPin === 'string' &&
-        currentSuperAdminPin.length > 0 &&
-        verifyPinHash(currentSuperAdminPin, existing.superAdminHash);
+      const emailLower = parsed.data.email.trim().toLowerCase();
+      const envAuth = getEnvAuth();
+      const envUsers = getEnvUsers();
+      const primaryStored = await readStoredAuth();
 
-      if (!hasValidSession && !hasValidCurrentPin) {
-        res.status(403).json({
-          error: 'Masukkan PIN Super Admin lama atau aktifkan sesi Super Admin terlebih dahulu.',
+      if (
+        (envAuth && envAuth.email === emailLower) ||
+        envUsers.some((u) => u.email === emailLower) ||
+        (primaryStored && primaryStored.email === emailLower)
+      ) {
+        res.status(409).json({ error: 'Email tersebut sudah terdaftar sebagai akun utama atau akun environment.' });
+        return;
+      }
+
+      const current = await readOperatorUsers();
+      const now = new Date().toISOString();
+      const existingIdx = current.findIndex((u) => u.email === emailLower);
+      if (existingIdx >= 0) {
+        current[existingIdx] = {
+          ...current[existingIdx],
+          name: parsed.data.name.trim() || current[existingIdx].name || emailLower.split('@')[0],
+          passwordHash: hashSecret(parsed.data.password),
+          updatedAt: now,
+        };
+      } else {
+        if (current.length >= 100) {
+          res.status(400).json({ error: 'Batas maksimal 100 akun operator tercapai.' });
+          return;
+        }
+        current.push({
+          email: emailLower,
+          name: parsed.data.name.trim() || emailLower.split('@')[0],
+          passwordHash: hashSecret(parsed.data.password),
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+
+      await writeOperatorUsers(current);
+      res.json({
+        ok: true,
+        storageMode: getStorageMode(),
+        users: current.map((u) => ({
+          email: u.email,
+          name: u.name,
+          createdAt: u.createdAt,
+          updatedAt: u.updatedAt,
+          source: 'stored',
+        })),
+      });
+    })
+  );
+
+  app.delete(
+    '/api/auth/users',
+    asyncHandler(async (req: Request, res: Response) => {
+      const authState = await getAppAuthSessionIfAllowed(req);
+      if (!authState.satisfied) {
+        res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
+        return;
+      }
+      const pinSession = verifySessionToken(extractPinToken(req));
+      if (!pinSession || pinSession.role !== 'super_admin') {
+        res.status(403).json({ error: 'Hanya Super Admin yang dapat menghapus akun operator.' });
+        return;
+      }
+
+      const parsed = deleteOperatorSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Email akun yang ingin dihapus tidak valid.' });
+        return;
+      }
+
+      const emailLower = parsed.data.email.trim().toLowerCase();
+      const current = await readOperatorUsers();
+      const next = current.filter((u) => u.email !== emailLower);
+      if (next.length === current.length) {
+        res.status(404).json({ error: 'Akun operator tidak ditemukan.' });
+        return;
+      }
+
+      await writeOperatorUsers(next);
+      res.json({
+        ok: true,
+        storageMode: getStorageMode(),
+        users: next.map((u) => ({
+          email: u.email,
+          name: u.name,
+          createdAt: u.createdAt,
+          updatedAt: u.updatedAt,
+          source: 'stored',
+        })),
+      });
+    })
+  );
+
+  app.get(
+    '/api/pin/status',
+    asyncHandler(async (req: Request, res: Response) => {
+      const envPins = getEnvPins();
+      const stored = await readStoredPins();
+      const token = extractPinToken(req);
+      const authState = await getAppAuthSessionIfAllowed(req);
+      const session = authState.satisfied ? verifySessionToken(token) : null;
+      res.json({
+        configured: Boolean(envPins || stored),
+        envManaged: Boolean(envPins),
+        hasAdminPin: Boolean(envPins || stored?.adminHash),
+        hasSuperAdminPin: Boolean(envPins || stored?.superAdminHash),
+        sessionValid: Boolean(session),
+        sessionRole: session?.role ?? null,
+      });
+    })
+  );
+
+  app.post(
+    '/api/pin/setup',
+    asyncHandler(async (req: Request, res: Response) => {
+      const authState = await getAppAuthSessionIfAllowed(req);
+      if (!authState.satisfied) {
+        res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
+        return;
+      }
+
+      const envPins = getEnvPins();
+      if (envPins) {
+        res.status(409).json({
+          error: 'PIN dikelola melalui environment variable server (ADMIN_BACKUP_PIN & SUPER_ADMIN_BACKUP_PIN).',
+          envManaged: true,
         });
         return;
       }
-    }
 
-    writeStoredPins({
-      adminHash: hashPin(adminPin),
-      superAdminHash: hashPin(superAdminPin),
-      updatedAt: new Date().toISOString(),
-    });
+      const parsed = setupPinSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.issues[0]?.message || 'Format PIN tidak valid.' });
+        return;
+      }
 
-    const issued = issueSessionToken('super_admin');
-    res.json(issued);
-  });
+      const { superAdminPin, adminPin, currentSuperAdminPin } = parsed.data;
+      if (superAdminPin === adminPin) {
+        res.status(400).json({ error: 'PIN Super Admin dan PIN Admin tidak boleh sama.' });
+        return;
+      }
 
-  app.post('/api/pin/verify', (req: Request, res: Response) => {
-    if (!isAppAuthSatisfied(req)) {
-      res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
-      return;
-    }
+      const existing = await readStoredPins();
+      if (existing) {
+        const token = extractPinToken(req);
+        const session = verifySessionToken(token);
+        const hasValidSession = session?.role === 'super_admin';
+        const hasValidCurrentPin =
+          typeof currentSuperAdminPin === 'string' &&
+          currentSuperAdminPin.length > 0 &&
+          verifySecretHash(currentSuperAdminPin, existing.superAdminHash);
 
-    const parsed = verifyPinSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: 'Permintaan verifikasi PIN tidak valid.' });
-      return;
-    }
+        if (!hasValidSession && !hasValidCurrentPin) {
+          res.status(403).json({
+            error: 'Masukkan PIN Super Admin lama atau aktifkan sesi Super Admin terlebih dahulu.',
+          });
+          return;
+        }
+      }
 
-    const { targetRole, pin } = parsed.data;
-    const rateKey = `${getClientKey(req)}:${targetRole}`;
-    if (isRateLimited(rateKey)) {
-      res.status(429).json({
-        error: 'Terlalu banyak percobaan PIN gagal. Tunggu 5 menit sebelum mencoba lagi.',
+      await writeStoredPins({
+        adminHash: hashSecret(adminPin),
+        superAdminHash: hashSecret(superAdminPin),
+        updatedAt: new Date().toISOString(),
       });
-      return;
-    }
 
-    const envPins = getEnvPins();
-    if (envPins) {
+      const issued = issueSessionToken('super_admin');
+      res.json(issued);
+    })
+  );
+
+  app.post(
+    '/api/pin/verify',
+    asyncHandler(async (req: Request, res: Response) => {
+      const authState = await getAppAuthSessionIfAllowed(req);
+      if (!authState.satisfied) {
+        res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
+        return;
+      }
+
+      const parsed = verifyPinSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Permintaan verifikasi PIN tidak valid.' });
+        return;
+      }
+
+      const { targetRole, pin } = parsed.data;
+      const rateKey = `${getClientKey(req)}:${targetRole}`;
+      if (isRateLimited(rateKey)) {
+        res.status(429).json({
+          error: 'Terlalu banyak percobaan PIN gagal. Tunggu 5 menit sebelum mencoba lagi.',
+        });
+        return;
+      }
+
+      const envPins = getEnvPins();
+      if (envPins) {
+        const ok =
+          targetRole === 'super_admin'
+            ? verifyPlainSecret(pin, envPins.superAdminPin)
+            : verifyPlainSecret(pin, envPins.adminPin) || verifyPlainSecret(pin, envPins.superAdminPin);
+
+        if (!ok) {
+          recordFailure(rateKey);
+          res.status(401).json({ error: 'PIN tidak sesuai.' });
+          return;
+        }
+
+        clearFailures(rateKey);
+        res.json(issueSessionToken(targetRole));
+        return;
+      }
+
+      const stored = await readStoredPins();
+      if (!stored) {
+        res.status(400).json({
+          needsSetup: true,
+          error: 'PIN cadangan belum diatur. Silakan lakukan pengaturan PIN awal.',
+        });
+        return;
+      }
+
       const ok =
         targetRole === 'super_admin'
-          ? verifyPlainSecret(pin, envPins.superAdminPin)
-          : verifyPlainSecret(pin, envPins.adminPin) || verifyPlainSecret(pin, envPins.superAdminPin);
+          ? verifySecretHash(pin, stored.superAdminHash)
+          : verifySecretHash(pin, stored.adminHash) || verifySecretHash(pin, stored.superAdminHash);
 
       if (!ok) {
         recordFailure(rateKey);
@@ -656,80 +1181,160 @@ export function createApp() {
 
       clearFailures(rateKey);
       res.json(issueSessionToken(targetRole));
-      return;
-    }
+    })
+  );
 
-    const stored = readStoredPins();
-    if (!stored) {
-      res.status(400).json({
-        needsSetup: true,
-        error: 'PIN cadangan belum diatur. Silakan lakukan pengaturan PIN awal.',
+  app.get(
+    '/api/warehouse/state',
+    asyncHandler(async (req: Request, res: Response) => {
+      const authState = await getAppAuthSessionIfAllowed(req);
+      if (!authState.satisfied) {
+        res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
+        return;
+      }
+
+      const state = await readSharedWarehouseState();
+      const sinceRaw = typeof req.query.since === 'string' ? Number(req.query.since) : NaN;
+      const storageMode = getStorageMode();
+
+      if (Number.isFinite(sinceRaw) && sinceRaw >= 0 && sinceRaw >= state.revision) {
+        res.json({
+          changed: false,
+          revision: state.revision,
+          updatedAt: state.updatedAt,
+          updatedBy: state.updatedBy,
+          storageMode,
+        });
+        return;
+      }
+
+      res.json({
+        changed: true,
+        revision: state.revision,
+        updatedAt: state.updatedAt,
+        updatedBy: state.updatedBy,
+        warehousesMeta: state.warehousesMeta,
+        warehouses: state.warehouses,
+        storageMode,
       });
-      return;
+    })
+  );
+
+  app.put(
+    '/api/warehouse/state',
+    asyncHandler(async (req: Request, res: Response) => {
+      const authState = await getAppAuthSessionIfAllowed(req);
+      if (!authState.satisfied) {
+        res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
+        return;
+      }
+
+      const parsed = saveWarehouseStateSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: parsed.error.issues[0]?.message || 'Format sinkronisasi data gudang tidak valid.',
+        });
+        return;
+      }
+
+      const storageMode = getStorageMode();
+      const currentState = await readSharedWarehouseState();
+      const { baseRevision, warehousesMeta, warehouses, forceOverwrite } = parsed.data;
+
+      if (!forceOverwrite && currentState.revision > 0 && baseRevision < currentState.revision) {
+        res.status(409).json({
+          conflict: true,
+          error: 'Data gudang telah diperbarui oleh pengguna lain.',
+          latest: currentState,
+          storageMode,
+        });
+        return;
+      }
+
+      const actorEmail = authState.session?.sub || 'operator';
+      const nextState: SharedWarehouseState = {
+        revision: currentState.revision + 1,
+        updatedAt: Date.now(),
+        updatedBy: actorEmail,
+        warehousesMeta,
+        warehouses,
+      };
+
+      await writeSharedWarehouseState(nextState);
+
+      res.json({
+        ok: true,
+        revision: nextState.revision,
+        updatedAt: nextState.updatedAt,
+        updatedBy: nextState.updatedBy,
+        storageMode,
+      });
+    })
+  );
+
+  app.post(
+    '/api/cycle-count/csv',
+    asyncHandler(async (req: Request, res: Response) => {
+      const authState = await getAppAuthSessionIfAllowed(req);
+      if (!authState.satisfied) {
+        res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
+        return;
+      }
+
+      const parsed = csvExportSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Payload ekspor CSV Cycle Count tidak valid.' });
+        return;
+      }
+
+      const { lines, tgl, warehouseName } = parsed.data;
+      const title = `STOK AKHIR ${String(warehouseName || 'ONLINE WAREHOUSE').toUpperCase()} ${formatIndoDateUpper(tgl)}`.trim();
+
+      const csvRows: string[] = [
+        [title, '', '', '', '', ''].map(csvSafeCell).join(','),
+        ['SKU', 'NAMA PRODUK', 'STOK WMS', 'STOK FISIK', 'SELISIH HARI INI', 'SELISIH SEBELUMNYA'].map(csvSafeCell).join(','),
+      ];
+
+      for (const ln of lines) {
+        const wms = typeof ln.stokWms === 'number' ? ln.stokWms : typeof ln.sysQty === 'number' ? ln.sysQty : 0;
+        const phys = typeof ln.stokFisik === 'number' ? ln.stokFisik : typeof ln.physQty === 'number' ? ln.physQty : null;
+        const prevDiff =
+          typeof ln.selisihSebelumnya === 'number'
+            ? ln.selisihSebelumnya
+            : typeof ln.prevDiff === 'number'
+              ? ln.prevDiff
+              : null;
+        const hasPhys = phys !== null && Number.isFinite(phys);
+        const totalDiff = hasPhys ? phys - wms : null;
+        const todayDiff = hasPhys && totalDiff !== null ? (prevDiff !== null ? totalDiff - prevDiff : totalDiff) : null;
+
+        csvRows.push(
+          [
+            ln.sku || '',
+            ln.nama || '',
+            wms,
+            hasPhys ? phys : '',
+            todayDiff !== null ? todayDiff : '',
+            prevDiff !== null ? prevDiff : '',
+          ]
+            .map(csvSafeCell)
+            .join(',')
+        );
+      }
+
+      const body = '\uFEFF' + csvRows.join('\r\n');
+      const safeFileDate = String(tgl || 'report').replace(/[^a-zA-Z0-9_-]/g, '');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="cycle-count-${safeFileDate}.csv"`);
+      res.send(body);
+    })
+  );
+
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const message = err instanceof Error ? err.message : 'Terjadi kesalahan internal server.';
+    if (!res.headersSent) {
+      res.status(500).json({ error: message });
     }
-
-    const ok =
-      targetRole === 'super_admin'
-        ? verifyPinHash(pin, stored.superAdminHash)
-        : verifyPinHash(pin, stored.adminHash) || verifyPinHash(pin, stored.superAdminHash);
-
-    if (!ok) {
-      recordFailure(rateKey);
-      res.status(401).json({ error: 'PIN tidak sesuai.' });
-      return;
-    }
-
-    clearFailures(rateKey);
-    res.json(issueSessionToken(targetRole));
-  });
-
-  app.post('/api/cycle-count/csv', (req: Request, res: Response) => {
-    if (!isAppAuthSatisfied(req)) {
-      res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
-      return;
-    }
-
-    const parsed = csvExportSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: 'Payload ekspor CSV Cycle Count tidak valid.' });
-      return;
-    }
-
-    const { lines, tgl, warehouseName } = parsed.data;
-    const title = `STOK AKHIR ${String(warehouseName || 'ONLINE WAREHOUSE').toUpperCase()} ${formatIndoDateUpper(tgl)}`.trim();
-
-    const csvRows: string[] = [
-      [title, '', '', '', '', ''].map(csvSafeCell).join(','),
-      ['SKU', 'NAMA PRODUK', 'STOK WMS', 'STOK FISIK', 'SELISIH HARI INI', 'SELISIH SEBELUMNYA'].map(csvSafeCell).join(','),
-    ];
-
-    for (const ln of lines) {
-      const wms = typeof ln.stokWms === 'number' ? ln.stokWms : (typeof ln.sysQty === 'number' ? ln.sysQty : 0);
-      const phys = typeof ln.stokFisik === 'number' ? ln.stokFisik : (typeof ln.physQty === 'number' ? ln.physQty : null);
-      const prevDiff = typeof ln.selisihSebelumnya === 'number'
-        ? ln.selisihSebelumnya
-        : (typeof ln.prevDiff === 'number' ? ln.prevDiff : null);
-      const hasPhys = phys !== null && Number.isFinite(phys);
-      const totalDiff = hasPhys ? phys - wms : null;
-      const todayDiff = hasPhys && totalDiff !== null
-        ? (prevDiff !== null ? totalDiff - prevDiff : totalDiff)
-        : null;
-
-      csvRows.push([
-        ln.sku || '',
-        ln.nama || '',
-        wms,
-        hasPhys ? phys : '',
-        todayDiff !== null ? todayDiff : '',
-        prevDiff !== null ? prevDiff : '',
-      ].map(csvSafeCell).join(','));
-    }
-
-    const body = '\uFEFF' + csvRows.join('\r\n');
-    const safeFileDate = String(tgl || 'report').replace(/[^a-zA-Z0-9_-]/g, '');
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="cycle-count-${safeFileDate}.csv"`);
-    res.send(body);
   });
 
   return app;
