@@ -65,6 +65,7 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const RATE_WINDOW_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 10;
 
+let cachedSessionSecret: Buffer | null = null;
 const ephemSessionSecret = crypto.randomBytes(32);
 let memoryPinStore: StoredPinRecord | null = null;
 let memoryAuthStore: StoredAuthRecord | null = null;
@@ -101,12 +102,21 @@ function getKvConfig(): { url: string; token: string } | null {
   ];
 
   for (const [envKey, envVal] of Object.entries(process.env)) {
-    if (!envKey.endsWith('_REST_API_URL') || !envVal) continue;
-    const prefix = envKey.slice(0, -'_REST_API_URL'.length);
-    if (prefix === 'KV' || prefix === 'UPSTASH_REDIS') continue;
-    const tokenVal = String(process.env[`${prefix}_REST_API_TOKEN`] || '').trim();
-    if (tokenVal) {
-      candidates.push({ url: String(envVal).trim(), token: tokenVal });
+    if (!envVal) continue;
+    if (envKey.endsWith('_REST_API_URL')) {
+      const prefix = envKey.slice(0, -'_REST_API_URL'.length);
+      if (prefix === 'KV' || prefix === 'UPSTASH_REDIS') continue;
+      const tokenVal = String(process.env[`${prefix}_REST_API_TOKEN`] || '').trim();
+      if (tokenVal) {
+        candidates.push({ url: String(envVal).trim(), token: tokenVal });
+      }
+    } else if (envKey.endsWith('_REST_URL')) {
+      const prefix = envKey.slice(0, -'_REST_URL'.length);
+      if (prefix === 'UPSTASH_REDIS') continue;
+      const tokenVal = String(process.env[`${prefix}_REST_TOKEN`] || '').trim();
+      if (tokenVal) {
+        candidates.push({ url: String(envVal).trim(), token: tokenVal });
+      }
     }
   }
 
@@ -131,15 +141,8 @@ function getStorageMode(): StorageMode {
 }
 
 function hasStrongSessionSecret(): boolean {
-  return String(process.env.PIN_SESSION_SECRET || '').trim().length >= 16;
-}
-
-function getSessionSecret(): Buffer {
-  const configured = String(process.env.PIN_SESSION_SECRET || '').trim();
-  if (configured.length >= 16) {
-    return crypto.createHash('sha256').update(configured, 'utf8').digest();
-  }
-  return ephemSessionSecret;
+  const configured = String(process.env.PIN_SESSION_SECRET || process.env.SESSION_SECRET || '').trim();
+  return configured.length >= 16 || Boolean(getKvConfig());
 }
 
 async function kvGetJson<T>(key: string): Promise<{ hit: boolean; value: T | null }> {
@@ -152,6 +155,7 @@ async function kvGetJson<T>(key: string): Promise<{ hit: boolean; value: T | nul
         Authorization: `Bearer ${kv.token}`,
       },
       cache: 'no-store',
+      signal: typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(5000) : undefined,
     });
     if (!res.ok) return { hit: false, value: null };
     const payload = (await res.json()) as { result?: unknown };
@@ -178,11 +182,99 @@ async function kvSetJson(key: string, value: unknown): Promise<boolean> {
         'Content-Type': 'text/plain; charset=utf-8',
       },
       body: JSON.stringify(value),
+      signal: typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(5000) : undefined,
     });
     return res.ok;
   } catch {
     return false;
   }
+}
+
+async function kvSetNxJson(key: string, value: unknown): Promise<boolean> {
+  const kv = getKvConfig();
+  if (!kv) return false;
+  try {
+    const res = await fetch(kv.url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${kv.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(['SET', key, JSON.stringify(value), 'NX']),
+      signal: typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(5000) : undefined,
+    });
+    if (!res.ok) return false;
+    const payload = (await res.json().catch(() => ({}))) as { result?: unknown };
+    return payload.result === 'OK';
+  } catch {
+    return false;
+  }
+}
+
+async function getSessionSecretAsync(): Promise<Buffer> {
+  const configured = String(process.env.PIN_SESSION_SECRET || process.env.SESSION_SECRET || '').trim();
+  if (configured.length >= 16) {
+    return crypto.createHash('sha256').update(configured, 'utf8').digest();
+  }
+  if (cachedSessionSecret) return cachedSessionSecret;
+
+  // 1. Jika Redis/Vercel KV terhubung, gunakan secret persisten bersama di Redis agar semua lambda Vercel konsisten
+  const kvCfg = getKvConfig();
+  if (kvCfg) {
+    let existingKv = await kvGetJson<{ hex?: string }>('sgp:system:session_secret');
+    if (!existingKv.hit) {
+      await new Promise((r) => setTimeout(r, 150));
+      existingKv = await kvGetJson<{ hex?: string }>('sgp:system:session_secret');
+    }
+    if (existingKv.hit && existingKv.value && typeof existingKv.value.hex === 'string' && /^[0-9a-f]{64}$/i.test(existingKv.value.hex)) {
+      cachedSessionSecret = Buffer.from(existingKv.value.hex, 'hex');
+      return cachedSessionSecret;
+    }
+    if (existingKv.hit) {
+      const candidateHex = crypto.randomBytes(32).toString('hex');
+      await kvSetNxJson('sgp:system:session_secret', { hex: candidateHex });
+      const confirmKv = await kvGetJson<{ hex?: string }>('sgp:system:session_secret');
+      if (confirmKv.hit && confirmKv.value && typeof confirmKv.value.hex === 'string' && /^[0-9a-f]{64}$/i.test(confirmKv.value.hex)) {
+        cachedSessionSecret = Buffer.from(confirmKv.value.hex, 'hex');
+        return cachedSessionSecret;
+      }
+      await kvSetJson('sgp:system:session_secret', { hex: candidateHex });
+      cachedSessionSecret = Buffer.from(candidateHex, 'hex');
+      return cachedSessionSecret;
+    }
+    // Fallback deterministik berbasis KV token hanya jika koneksi Redis sempat gagal sementara
+    return crypto
+      .createHmac('sha256', kvCfg.token)
+      .update('scarlett-warehouse-kv-fallback-v1')
+      .digest();
+  }
+
+  // 2. Fallback file persisten lokal (.data / /tmp)
+  const diskSecret = readJsonFromPaths<{ hex?: string }>('session-secret.json', 'sgp-session-secret.json');
+  if (diskSecret && typeof diskSecret.hex === 'string' && /^[0-9a-f]{64}$/i.test(diskSecret.hex)) {
+    cachedSessionSecret = Buffer.from(diskSecret.hex, 'hex');
+    return cachedSessionSecret;
+  }
+
+  // 3. Jika di environment tanpa Redis dan tanpa file persisten, turunkan dari secret env server bila tersedia
+  const envSeedParts = [
+    String(process.env.APP_LOGIN_PASSWORD || '').trim(),
+    String(process.env.APP_USERS_JSON || '').trim(),
+    String(process.env.SUPER_ADMIN_BACKUP_PIN || '').trim(),
+    String(process.env.ADMIN_BACKUP_PIN || '').trim(),
+  ].filter(Boolean);
+  if (envSeedParts.length > 0 && process.env.VERCEL) {
+    cachedSessionSecret = crypto
+      .createHmac('sha256', envSeedParts.join('|'))
+      .update('scarlett-warehouse-session-v1')
+      .digest();
+    return cachedSessionSecret;
+  }
+
+  const generatedHex = crypto.randomBytes(32).toString('hex');
+  writeJsonToPaths('session-secret.json', 'sgp-session-secret.json', { hex: generatedHex });
+  cachedSessionSecret = Buffer.from(generatedHex, 'hex');
+  return cachedSessionSecret || ephemSessionSecret;
 }
 
 function resolveDataPaths(primaryFilename: string, tmpFilename: string): [string, string] {
@@ -500,7 +592,7 @@ function verifyPlainSecret(candidate: string, expected: string): boolean {
   return crypto.timingSafeEqual(a, b);
 }
 
-function issueSessionToken(role: AppRole): { token: string; role: AppRole; expiresAt: number } {
+function issueSessionToken(role: AppRole, secret: Buffer): { token: string; role: AppRole; expiresAt: number } {
   const now = Date.now();
   const payload: PinSessionPayload = {
     role,
@@ -508,17 +600,17 @@ function issueSessionToken(role: AppRole): { token: string; role: AppRole; expir
     exp: now + SESSION_TTL_MS,
   };
   const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
-  const sig = crypto.createHmac('sha256', getSessionSecret()).update(body).digest('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(body).digest('base64url');
   return { token: `${body}.${sig}`, role, expiresAt: payload.exp };
 }
 
-function verifySessionToken(rawToken: string | null | undefined): PinSessionPayload | null {
+function verifySessionToken(rawToken: string | null | undefined, secret: Buffer): PinSessionPayload | null {
   if (!rawToken || typeof rawToken !== 'string') return null;
   const parts = rawToken.trim().split('.');
   if (parts.length !== 2) return null;
   const [body, sig] = parts;
   if (!body || !sig) return null;
-  const expectedSig = crypto.createHmac('sha256', getSessionSecret()).update(body).digest('base64url');
+  const expectedSig = crypto.createHmac('sha256', secret).update(body).digest('base64url');
   const a = Buffer.from(sig, 'utf8');
   const b = Buffer.from(expectedSig, 'utf8');
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
@@ -540,7 +632,8 @@ function verifySessionToken(rawToken: string | null | undefined): PinSessionPayl
 
 function issueAppAuthToken(
   email: string,
-  role: AppAuthRole
+  role: AppAuthRole,
+  secret: Buffer
 ): { token: string; email: string; role: AppAuthRole; expiresAt: number } {
   const now = Date.now();
   const payload: AppAuthSessionPayload = {
@@ -550,17 +643,17 @@ function issueAppAuthToken(
     exp: now + SESSION_TTL_MS,
   };
   const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
-  const sig = crypto.createHmac('sha256', getSessionSecret()).update(`app:${body}`).digest('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(`app:${body}`).digest('base64url');
   return { token: `${body}.${sig}`, email: payload.sub, role, expiresAt: payload.exp };
 }
 
-function verifyAppAuthToken(rawToken: string | null | undefined): AppAuthSessionPayload | null {
+function verifyAppAuthToken(rawToken: string | null | undefined, secret: Buffer): AppAuthSessionPayload | null {
   if (!rawToken || typeof rawToken !== 'string') return null;
   const parts = rawToken.trim().split('.');
   if (parts.length !== 2) return null;
   const [body, sig] = parts;
   if (!body || !sig) return null;
-  const expectedSig = crypto.createHmac('sha256', getSessionSecret()).update(`app:${body}`).digest('base64url');
+  const expectedSig = crypto.createHmac('sha256', secret).update(`app:${body}`).digest('base64url');
   const a = Buffer.from(sig, 'utf8');
   const b = Buffer.from(expectedSig, 'utf8');
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
@@ -644,15 +737,18 @@ function extractBearerToken(req: Request): string | null {
   return null;
 }
 
-function extractAppAuthToken(req: Request): string | null {
-  const custom = req.headers['x-app-auth'];
-  if (typeof custom === 'string' && custom.trim()) {
-    return custom.trim();
+function extractValidAppAuthSession(req: Request, secret: Buffer): AppAuthSessionPayload | null {
+  const candidates: Array<string | null> = [
+    typeof req.headers['x-app-auth'] === 'string' ? req.headers['x-app-auth'].trim() : null,
+    extractBearerToken(req),
+    parseCookies(req)[APP_AUTH_COOKIE_NAME] || null,
+  ];
+  for (const cand of candidates) {
+    if (!cand) continue;
+    const verified = verifyAppAuthToken(cand, secret);
+    if (verified) return verified;
   }
-  const bearer = extractBearerToken(req);
-  if (bearer) return bearer;
-  const cookies = parseCookies(req);
-  return cookies[APP_AUTH_COOKIE_NAME] || null;
+  return null;
 }
 
 function extractPinToken(req: Request): string | null {
@@ -671,8 +767,8 @@ async function isAnyAuthConfigured(): Promise<boolean> {
 }
 
 async function getAppAuthSessionIfAllowed(req: Request): Promise<{ satisfied: boolean; session: AppAuthSessionPayload | null }> {
-  const configured = await isAnyAuthConfigured();
-  const session = verifyAppAuthToken(extractAppAuthToken(req));
+  const [configured, secret] = await Promise.all([isAnyAuthConfigured(), getSessionSecretAsync()]);
+  const session = extractValidAppAuthSession(req, secret);
   if (!configured) {
     return { satisfied: true, session };
   }
@@ -833,12 +929,14 @@ export function createApp() {
   app.get(
     '/api/auth/status',
     asyncHandler(async (req: Request, res: Response) => {
-      const envAuth = getEnvAuth();
-      const envUsers = getEnvUsers();
-      const storedAuth = await readStoredAuth();
-      const operatorUsers = await readOperatorUsers();
-      const token = extractAppAuthToken(req);
-      const session = verifyAppAuthToken(token);
+      const [envAuth, envUsers, storedAuth, operatorUsers, secret] = await Promise.all([
+        Promise.resolve(getEnvAuth()),
+        Promise.resolve(getEnvUsers()),
+        readStoredAuth(),
+        readOperatorUsers(),
+        getSessionSecretAsync(),
+      ]);
+      const session = extractValidAppAuthSession(req, secret);
       res.json({
         configured: Boolean(envAuth || envUsers.length > 0 || storedAuth || operatorUsers.length > 0),
         envManaged: Boolean(envAuth),
@@ -882,7 +980,8 @@ export function createApp() {
         updatedAt: new Date().toISOString(),
       });
 
-      const issued = issueAppAuthToken(emailLower, 'stockkeeper');
+      const secret = await getSessionSecretAsync();
+      const issued = issueAppAuthToken(emailLower, 'stockkeeper', secret);
       setAuthCookie(res, req, issued.token);
       res.json(issued);
     })
@@ -962,7 +1061,8 @@ export function createApp() {
       }
 
       clearFailures(rateKey);
-      const issued = issueAppAuthToken(matchedEmail, 'stockkeeper');
+      const secret = await getSessionSecretAsync();
+      const issued = issueAppAuthToken(matchedEmail, 'stockkeeper', secret);
       setAuthCookie(res, req, issued.token);
       res.json(issued);
     })
@@ -976,12 +1076,12 @@ export function createApp() {
   app.get(
     '/api/auth/users',
     asyncHandler(async (req: Request, res: Response) => {
-      const authState = await getAppAuthSessionIfAllowed(req);
+      const [authState, secret] = await Promise.all([getAppAuthSessionIfAllowed(req), getSessionSecretAsync()]);
       if (!authState.satisfied) {
         res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
         return;
       }
-      const pinSession = verifySessionToken(extractPinToken(req));
+      const pinSession = verifySessionToken(extractPinToken(req), secret);
       if (!pinSession || pinSession.role !== 'super_admin') {
         res.status(403).json({ error: 'Hanya Super Admin yang dapat mengelola daftar akun operator.' });
         return;
@@ -1011,12 +1111,12 @@ export function createApp() {
   app.post(
     '/api/auth/users',
     asyncHandler(async (req: Request, res: Response) => {
-      const authState = await getAppAuthSessionIfAllowed(req);
+      const [authState, secret] = await Promise.all([getAppAuthSessionIfAllowed(req), getSessionSecretAsync()]);
       if (!authState.satisfied) {
         res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
         return;
       }
-      const pinSession = verifySessionToken(extractPinToken(req));
+      const pinSession = verifySessionToken(extractPinToken(req), secret);
       if (!pinSession || pinSession.role !== 'super_admin') {
         res.status(403).json({ error: 'Hanya Super Admin yang dapat menambah atau memperbarui akun operator.' });
         return;
@@ -1084,12 +1184,12 @@ export function createApp() {
   app.delete(
     '/api/auth/users',
     asyncHandler(async (req: Request, res: Response) => {
-      const authState = await getAppAuthSessionIfAllowed(req);
+      const [authState, secret] = await Promise.all([getAppAuthSessionIfAllowed(req), getSessionSecretAsync()]);
       if (!authState.satisfied) {
         res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
         return;
       }
-      const pinSession = verifySessionToken(extractPinToken(req));
+      const pinSession = verifySessionToken(extractPinToken(req), secret);
       if (!pinSession || pinSession.role !== 'super_admin') {
         res.status(403).json({ error: 'Hanya Super Admin yang dapat menghapus akun operator.' });
         return;
@@ -1128,10 +1228,13 @@ export function createApp() {
     '/api/pin/status',
     asyncHandler(async (req: Request, res: Response) => {
       const envPins = getEnvPins();
-      const stored = await readStoredPins();
+      const [stored, authState, secret] = await Promise.all([
+        readStoredPins(),
+        getAppAuthSessionIfAllowed(req),
+        getSessionSecretAsync(),
+      ]);
       const token = extractPinToken(req);
-      const authState = await getAppAuthSessionIfAllowed(req);
-      const session = authState.satisfied ? verifySessionToken(token) : null;
+      const session = authState.satisfied ? verifySessionToken(token, secret) : null;
       res.json({
         configured: Boolean(envPins || stored),
         envManaged: Boolean(envPins),
@@ -1146,7 +1249,7 @@ export function createApp() {
   app.post(
     '/api/pin/setup',
     asyncHandler(async (req: Request, res: Response) => {
-      const authState = await getAppAuthSessionIfAllowed(req);
+      const [authState, secret] = await Promise.all([getAppAuthSessionIfAllowed(req), getSessionSecretAsync()]);
       if (!authState.satisfied) {
         res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
         return;
@@ -1176,7 +1279,7 @@ export function createApp() {
       const existing = await readStoredPins();
       if (existing) {
         const token = extractPinToken(req);
-        const session = verifySessionToken(token);
+        const session = verifySessionToken(token, secret);
         const hasValidSession = session?.role === 'super_admin';
         const hasValidCurrentPin =
           typeof currentSuperAdminPin === 'string' &&
@@ -1197,7 +1300,7 @@ export function createApp() {
         updatedAt: new Date().toISOString(),
       });
 
-      const issued = issueSessionToken('super_admin');
+      const issued = issueSessionToken('super_admin', secret);
       res.json(issued);
     })
   );
@@ -1205,7 +1308,7 @@ export function createApp() {
   app.post(
     '/api/pin/verify',
     asyncHandler(async (req: Request, res: Response) => {
-      const authState = await getAppAuthSessionIfAllowed(req);
+      const [authState, secret] = await Promise.all([getAppAuthSessionIfAllowed(req), getSessionSecretAsync()]);
       if (!authState.satisfied) {
         res.status(401).json({ error: 'Silakan masuk dengan email dan password terlebih dahulu.' });
         return;
@@ -1240,7 +1343,7 @@ export function createApp() {
         }
 
         clearFailures(rateKey);
-        res.json(issueSessionToken(targetRole));
+        res.json(issueSessionToken(targetRole, secret));
         return;
       }
 
@@ -1265,7 +1368,7 @@ export function createApp() {
       }
 
       clearFailures(rateKey);
-      res.json(issueSessionToken(targetRole));
+      res.json(issueSessionToken(targetRole, secret));
     })
   );
 

@@ -3160,7 +3160,8 @@
     }
 
     async function pushSharedWarehouseState() {
-      if (!appAuthStatusCache.authenticated || !window.__sgpCloud || !window.__sgpCloud.warehouse) return;
+      var cloud = await waitForCloudBridge(2000);
+      if (!appAuthStatusCache.authenticated || !cloud || !cloud.warehouse) return;
       if (typeof navigator !== 'undefined' && navigator.onLine === false) {
         sharedSyncState.pending = true;
         sharedSyncState.dirty = true;
@@ -3258,7 +3259,8 @@
     }
 
     async function pullSharedWarehouseState(isInitialOrManual) {
-      if (!appAuthStatusCache.authenticated || !window.__sgpCloud || !window.__sgpCloud.warehouse) return;
+      var cloud = await waitForCloudBridge(2000);
+      if (!appAuthStatusCache.authenticated || !cloud || !cloud.warehouse) return;
       if (typeof navigator !== 'undefined' && navigator.onLine === false) {
         if (isInitialOrManual === 'manual') {
           showToast('Perangkat sedang offline. Data tetap tersimpan aman secara lokal.', 'warn');
@@ -4848,6 +4850,17 @@
     var pinSessionRole = (initialStoredPinRole === 'admin' || initialStoredPinRole === 'super_admin') ? initialStoredPinRole : null;
     var rolePreviewOverride = ''; // opsional jika admin/super_admin ingin memakai mode lebih rendah
     var pinStatusCache = { loaded: false, configured: false, envManaged: false, hasAdminPin: false, hasSuperAdminPin: false };
+    var authTransitionSeq = 0;
+    var pinTransitionSeq = 0;
+
+    async function waitForCloudBridge(maxWaitMs) {
+      if (window.__sgpCloud) return window.__sgpCloud;
+      var deadline = Date.now() + (maxWaitMs || 2000);
+      while (!window.__sgpCloud && Date.now() < deadline) {
+        await new Promise(function (resolve) { setTimeout(resolve, 50); });
+      }
+      return window.__sgpCloud || null;
+    }
 
     function persistAppAuthToken(tok) {
       appAuthToken = String(tok || '').trim();
@@ -4913,8 +4926,8 @@
 
     function getAllowedTabsForRole(role) {
       var r = normalizeAppRole(role);
-      if (r === 'stockkeeper') return ['masuk', 'keluar', 'pindah', 'stok'];
-      if (r === 'admin') return ['dashboard', 'masuk', 'inbound', 'keluar', 'pindah', 'stok'];
+      if (r === 'stockkeeper') return ['masuk', 'keluar', 'pindah', 'transfer', 'stok'];
+      if (r === 'admin') return ['dashboard', 'masuk', 'inbound', 'keluar', 'pindah', 'transfer', 'stok'];
       return ['dashboard', 'masuk', 'inbound', 'keluar', 'pindah', 'stok', 'pengaturan', 'defect', 'expire', 'cyclecount', 'transfer', 'opname', 'semua', 'analitik', 'cek', 'gudang', 'master'];
     }
 
@@ -4976,6 +4989,7 @@
               { id: 'masuk', label: 'Barang Masuk' },
               { id: 'keluar', label: 'Barang Keluar' },
               { id: 'pindah', label: 'Perpindahan Barang' },
+              { id: 'transfer', label: 'Pindah Gudang' },
               { id: 'stok', label: 'Stok Aktif' }
             ]
           }
@@ -4992,6 +5006,7 @@
               { id: 'inbound', label: 'Surat Jalan' },
               { id: 'keluar', label: 'Barang Keluar' },
               { id: 'pindah', label: 'Perpindahan Barang' },
+              { id: 'transfer', label: 'Pindah Gudang' },
               { id: 'stok', label: 'Stok Aktif' }
             ]
           }
@@ -6086,9 +6101,12 @@
     }
 
     async function refreshPinStatus() {
-      if (!window.__sgpCloud || !window.__sgpCloud.pinAuth) return pinStatusCache;
+      var cloud = await waitForCloudBridge(2000);
+      if (!cloud || !cloud.pinAuth) return pinStatusCache;
+      var myPinSeq = ++pinTransitionSeq;
       try {
-        var res = await window.__sgpCloud.pinAuth.getStatus(pinSessionToken || null, appAuthToken || null);
+        var res = await cloud.pinAuth.getStatus(pinSessionToken || null, appAuthToken || null);
+        if (myPinSeq !== pinTransitionSeq) return pinStatusCache;
         pinStatusCache = {
           loaded: true,
           configured: !!res.configured,
@@ -6099,13 +6117,15 @@
         if (pinSessionToken && !res.sessionValid) {
           persistPinSession('', null);
           rolePreviewOverride = '';
-          renderApp();
+          try { renderApp(); } catch (re) { console.error(re); }
         } else if (res.sessionValid && res.sessionRole && pinSessionRole !== res.sessionRole) {
           persistPinSession(pinSessionToken, res.sessionRole);
-          renderApp();
+          try { renderApp(); } catch (re) { console.error(re); }
         }
       } catch {
-        pinStatusCache.loaded = false;
+        if (myPinSeq === pinTransitionSeq) {
+          pinStatusCache.loaded = false;
+        }
       }
       return pinStatusCache;
     }
@@ -6131,12 +6151,12 @@
           {
             id: 'stockkeeper',
             title: 'Stockkeeper',
-            desc: 'Role default setelah masuk: Barang Masuk, Barang Keluar, Perpindahan Barang, dan Stok Aktif.'
+            desc: 'Role default setelah masuk: Barang Masuk, Barang Keluar, Perpindahan Barang, Pindah Gudang, dan Stok Aktif.'
           },
           {
             id: 'admin',
             title: 'Admin',
-            desc: 'Operasional harian (6 menu): Dashboard, Surat Jalan, Barang Masuk, Barang Keluar, Perpindahan, dan Stok Aktif.'
+            desc: 'Operasional harian: Dashboard, Surat Jalan, Barang Masuk, Barang Keluar, Perpindahan, Pindah Gudang, dan Stok Aktif.'
           },
           {
             id: 'super_admin',
@@ -6197,7 +6217,7 @@
               currentTab = defaultTabForRole(target);
               closeRoleModal();
               showToast('Beralih ke mode ' + ROLE_LABELS[target], 'ok');
-              renderApp();
+              try { renderApp(); } catch (re) { console.error(re); showToast('Gagal merender tampilan role: ' + ((re && re.message) || 'coba muat ulang'), 'err'); }
             } else {
               pendingTarget = target;
               renderModalBody();
@@ -6212,12 +6232,13 @@
         var lockPinBtn = document.getElementById('modal-pin-lock-btn');
         if (lockPinBtn) {
           lockPinBtn.addEventListener('click', function () {
+            pinTransitionSeq += 1;
             persistPinSession('', null);
             rolePreviewOverride = '';
             currentTab = defaultTabForRole(getEffectiveRole());
             closeRoleModal();
             showToast('Akses PIN dikunci. Kembali ke mode Stockkeeper.', 'ok');
-            renderApp();
+            try { renderApp(); } catch (re) { console.error(re); }
           });
         }
 
@@ -6243,22 +6264,31 @@
               return;
             }
             try {
-              var res = await window.__sgpCloud.pinAuth.setupPins(
+              var cloud = await waitForCloudBridge(2000);
+              if (!cloud || !cloud.pinAuth) throw new Error('Koneksi modul autentikasi belum siap. Coba lagi.');
+              var res = await cloud.pinAuth.setupPins(
                 { superAdminPin: superPin, adminPin: adminPin },
                 null,
                 appAuthToken || null
               );
+              pinTransitionSeq += 1;
               persistPinSession(res.token, res.role);
               rolePreviewOverride = '';
+              pinStatusCache.loaded = true;
               pinStatusCache.configured = true;
               pinStatusCache.hasAdminPin = true;
               pinStatusCache.hasSuperAdminPin = true;
               currentTab = defaultTabForRole(res.role);
               closeRoleModal();
               showToast('PIN berhasil disimpan. Mode Super Admin aktif.', 'ok');
-              renderApp();
+              try { renderApp(); } catch (re) { console.error(re); showToast('Gagal merender tampilan Super Admin: ' + ((re && re.message) || 'coba lagi'), 'err'); }
             } catch (err) {
-              showToast(err.message || 'Gagal menyimpan PIN', 'err');
+              if (err && err.status === 401) {
+                showToast('Sesi login tidak terverifikasi di server. Mencoba menyegarkan sesi…', 'warn');
+                void syncAppAuthStatus(true);
+              } else {
+                showToast((err && err.message) || 'Gagal menyimpan PIN', 'err');
+              }
             }
           });
         }
@@ -6269,19 +6299,26 @@
             e.preventDefault();
             var pinVal = document.getElementById('verify-pin-inp').value.trim();
             try {
-              var res = await window.__sgpCloud.pinAuth.verifyPin(pendingTarget, pinVal, appAuthToken || null);
+              var cloud = await waitForCloudBridge(2000);
+              if (!cloud || !cloud.pinAuth) throw new Error('Koneksi modul autentikasi belum siap. Coba lagi.');
+              var res = await cloud.pinAuth.verifyPin(pendingTarget, pinVal, appAuthToken || null);
+              pinTransitionSeq += 1;
               persistPinSession(res.token, res.role);
               rolePreviewOverride = '';
+              pinStatusCache.loaded = true;
               currentTab = defaultTabForRole(res.role);
               closeRoleModal();
               showToast('Role ' + ROLE_LABELS[res.role] + ' dibuka', 'ok');
-              renderApp();
+              try { renderApp(); } catch (re) { console.error(re); showToast('Gagal merender tampilan ' + ROLE_LABELS[res.role] + ': ' + ((re && re.message) || 'coba lagi'), 'err'); }
             } catch (err) {
               if (err && err.needsSetup) {
                 pinStatusCache.configured = false;
                 renderModalBody();
+              } else if (err && err.status === 401 && String((err && err.message) || '').toLowerCase().includes('email')) {
+                showToast('Sesi login tidak terverifikasi di server. Silakan masuk ulang.', 'warn');
+                void syncAppAuthStatus(true);
               } else {
-                showToast(err.message || 'PIN salah', 'err');
+                showToast((err && err.message) || 'PIN salah', 'err');
               }
             }
           });
@@ -6342,6 +6379,10 @@
         drawerHtml += '<div class="nav-group-title" style="padding:0 2px 8px">' + esc(grp.title) + '</div><div class="drawer-grid">' + itemsHtmlDrawer + '</div>';
       });
       document.getElementById('sidebar-nav').innerHTML = sideHtml;
+      if (activeRole === 'stockkeeper') {
+        drawerHtml += '<div style="margin-top:12px"><button type="button" class="drawer-item" id="drawer-role-btn">' +
+          '<span class="drawer-item-left">' + iconSvg('shield') + '<span class="nav-item-label">Ganti Role / PIN</span></span></button></div>';
+      }
       document.getElementById('mobile-drawer-body').innerHTML = drawerHtml;
 
       var dockHtml = '';
@@ -6349,7 +6390,7 @@
         var skDock = [
           { id: 'masuk', label: 'Masuk', icon: 'masuk' },
           { id: 'keluar', label: 'Keluar', icon: 'keluar' },
-          { id: 'pindah', label: 'Pindah', icon: 'pindah' },
+          { id: 'pindah', label: 'Pindah Rak', icon: 'pindah' },
           { id: 'stok', label: 'Stok Aktif', icon: 'stok' }
         ];
         dockHtml = skDock.map(function (t) {
@@ -6357,8 +6398,9 @@
           return '<button type="button" class="dock-btn' + act + '" data-tab="' + t.id + '">' +
             iconSvg(t.icon) + '<span>' + esc(t.label) + '</span></button>';
         }).join('');
-        dockHtml += '<button type="button" class="dock-btn" id="dock-role-btn">' +
-          iconSvg('shield') + '<span>Role</span></button>';
+        var isSkOtherActive = !skDock.some(function (t) { return t.id === currentTab; });
+        dockHtml += '<button type="button" class="dock-btn' + (isSkOtherActive ? ' active' : '') + '" id="dock-menu-btn">' +
+          iconSvg('menu') + '<span>Menu</span></button>';
       } else {
         var dockTabs = [
           { id: 'dashboard', label: 'Beranda', icon: 'dashboard', badgeCount: 0 },
@@ -6392,6 +6434,13 @@
       var menuBtn = document.getElementById('dock-menu-btn');
       if (menuBtn) {
         menuBtn.addEventListener('click', openMobileDrawer);
+      }
+      var drawerRoleBtn = document.getElementById('drawer-role-btn');
+      if (drawerRoleBtn) {
+        drawerRoleBtn.addEventListener('click', function () {
+          closeMobileDrawer();
+          openRoleModal('');
+        });
       }
       var dockRoleBtn = document.getElementById('dock-role-btn');
       if (dockRoleBtn) {
@@ -9310,14 +9359,20 @@
       );
 
       if (others.length === 0) {
+        var canManageWh = getEffectiveRole() === 'super_admin';
         html += '<div class="empty-state"><h3>Belum Ada Gudang Tujuan</h3>' +
-          '<p>Tambahkan gudang kedua terlebih dahulu di menu Kelola Gudang agar fitur transfer antar-gudang dapat digunakan.</p>' +
-          '<div class="empty-actions"><button type="button" class="btn btn-primary" id="btn-go-gudang">Buka Kelola Gudang</button></div></div>';
+          '<p>' + (canManageWh
+            ? 'Tambahkan gudang kedua terlebih dahulu di menu Kelola Gudang agar fitur transfer antar-gudang dapat digunakan.'
+            : 'Saat ini baru terdapat satu gudang. Hubungi Super Admin untuk menambahkan gudang kedua agar fitur pindah antar-gudang dapat digunakan.') + '</p>' +
+          (canManageWh ? '<div class="empty-actions"><button type="button" class="btn btn-primary" id="btn-go-gudang">Buka Kelola Gudang</button></div>' : '') + '</div>';
         root.innerHTML = html;
-        document.getElementById('btn-go-gudang').addEventListener('click', function () {
-          currentTab = 'gudang';
-          renderApp();
-        });
+        var goGudangBtn = document.getElementById('btn-go-gudang');
+        if (goGudangBtn) {
+          goGudangBtn.addEventListener('click', function () {
+            currentTab = 'gudang';
+            renderApp();
+          });
+        }
         return;
       }
 
@@ -12687,7 +12742,12 @@
         if ((options && options.freshLogin) || allowed.indexOf(currentTab) < 0) {
           currentTab = defaultTabForRole(getEffectiveRole());
         }
-        renderApp();
+        try {
+          renderApp();
+        } catch (renderErr) {
+          console.error('renderApp error after unlock:', renderErr);
+          showToast('Tampilan dimuat dengan pemulihan: ' + ((renderErr && renderErr.message) || 'coba muat ulang'), 'warn');
+        }
         if (!wasUnlocked || prevEmail !== appAuthEmail) {
           if (!(options && options.skipRemoteCheck)) {
             refreshPinStatus();
@@ -12792,12 +12852,14 @@
               if (!loginRes.ok) {
                 throw new Error((loginData && loginData.error) || 'Akun login sudah aktif di server. Silakan masuk dengan email & password yang benar.');
               }
+              authTransitionSeq += 1;
               persistAppAuthToken(loginData.token);
               setAuthUnlockedState(true, loginData.email, loginData.role, { freshLogin: true });
               showToast('Berhasil masuk sebagai Stockkeeper (' + loginData.email + ')', 'ok');
               return;
             }
             if (!res.ok) throw new Error(data.error || 'Gagal menyimpan akun login.');
+            authTransitionSeq += 1;
             persistAppAuthToken(data.token);
             appAuthStatusCache.configured = true;
             setAuthUnlockedState(true, data.email, data.role, { freshLogin: true });
@@ -12832,6 +12894,7 @@
               }
               throw new Error((data && data.error) || 'Email atau password salah.');
             }
+            authTransitionSeq += 1;
             persistAppAuthToken(data.token);
             setAuthUnlockedState(true, data.email, data.role, { freshLogin: true });
             showToast('Berhasil masuk sebagai Stockkeeper (' + data.email + ')', 'ok');
@@ -12844,28 +12907,51 @@
       }
     }
 
+    async function fetchAuthStatusOnce() {
+      var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      var timer = controller ? setTimeout(function () { controller.abort(); }, 6000) : null;
+      try {
+        var headers = appAuthToken
+          ? { Authorization: 'Bearer ' + appAuthToken, 'X-App-Auth': appAuthToken }
+          : {};
+        var res = await fetch('/api/auth/status', {
+          method: 'GET',
+          credentials: 'same-origin',
+          headers: headers,
+          cache: 'no-store',
+          signal: controller ? controller.signal : undefined
+        });
+        if (timer) clearTimeout(timer);
+        var ct = String((res.headers && res.headers.get('content-type')) || '').toLowerCase();
+        if (!res.ok || !ct.includes('application/json')) {
+          throw new Error('Server autentikasi tidak merespons dengan benar (HTTP ' + res.status + '). Coba muat ulang halaman.');
+        }
+        return await res.json();
+      } catch (err) {
+        if (timer) clearTimeout(timer);
+        throw err;
+      }
+    }
+
     async function syncAppAuthStatus(preserveError) {
+      var mySeq = ++authTransitionSeq;
+      var wasAuthenticated = Boolean(appAuthStatusCache.authenticated);
       var lastErr = null;
       for (var attempt = 0; attempt < 2; attempt++) {
-        var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        var timer = controller ? setTimeout(function () { controller.abort(); }, 6000) : null;
         try {
-          var headers = appAuthToken ? { Authorization: 'Bearer ' + appAuthToken } : {};
-          var res = await fetch('/api/auth/status', {
-            method: 'GET',
-            credentials: 'same-origin',
-            headers: headers,
-            cache: 'no-store',
-            signal: controller ? controller.signal : undefined
-          });
-          if (timer) clearTimeout(timer);
-          var ct = String((res.headers && res.headers.get('content-type')) || '').toLowerCase();
-          if (!res.ok || !ct.includes('application/json')) {
-            throw new Error('Server autentikasi tidak merespons dengan benar (HTTP ' + res.status + '). Coba muat ulang halaman.');
-          }
-          var st = await res.json();
+          var st = await fetchAuthStatusOnce();
+          if (mySeq !== authTransitionSeq) return;
           if (st && st.storageMode) sharedSyncState.storageMode = st.storageMode;
           if (st && typeof st.hasSessionSecret === 'boolean') sharedSyncState.hasSessionSecret = st.hasSessionSecret;
+
+          // Jika sebelumnya sesi sedang aktif dan tiba-tiba ditolak, verifikasi ulang 1 kali sebelum mengunci
+          if (!st.authenticated && wasAuthenticated && appAuthToken) {
+            await new Promise(function (resolve) { setTimeout(resolve, 350); });
+            if (mySeq !== authTransitionSeq) return;
+            st = await fetchAuthStatusOnce();
+            if (mySeq !== authTransitionSeq) return;
+          }
+
           var prevConfigured = appAuthStatusCache.configured;
           appAuthStatusCache = {
             loaded: true,
@@ -12877,19 +12963,25 @@
             setAuthUnlockedState(true, st.email, st.role);
           } else {
             setAuthUnlockedState(false, '', null, { clearSyncState: !sharedSyncState.pending });
-            if (!preserveError || prevConfigured !== appAuthStatusCache.configured) {
+            if (wasAuthenticated) {
+              renderLoginScreen('Sesi berakhir atau tidak terverifikasi di server — silakan masuk kembali.');
+              showToast('Sesi login berakhir di server — silakan masuk ulang.', 'warn');
+            } else if (!preserveError || prevConfigured !== appAuthStatusCache.configured) {
               renderLoginScreen('');
             }
           }
           return;
         } catch (err) {
-          if (timer) clearTimeout(timer);
+          if (mySeq !== authTransitionSeq) return;
           lastErr = err;
           if (attempt === 0) {
             await new Promise(function (resolve) { setTimeout(resolve, 450); });
+            if (mySeq !== authTransitionSeq) return;
           }
         }
       }
+
+      if (mySeq !== authTransitionSeq) return;
 
       // Jika jaringan sedang offline / lambat saat refresh, tetap izinkan sesi lokal yang belum kedaluwarsa agar input data tetap berjalan
       var cachedPayload = decodeTokenPayload(appAuthToken);
@@ -12917,6 +13009,8 @@
             'Keluar Aplikasi',
             '<p style="margin:0">Keluar dari sesi login saat ini dan kembali ke halaman masuk?</p>',
             function () {
+              authTransitionSeq += 1;
+              pinTransitionSeq += 1;
               var tok = appAuthToken;
               setAuthUnlockedState(false, '', null, { clearSyncState: true });
               fetch('/api/auth/logout', {
@@ -12974,7 +13068,7 @@
 
     // Boot
     applyTheme(safeGet(THEME_KEY, 'auto'));
-    renderApp();
+    try { renderApp(); } catch (bootErr) { console.error(bootErr); }
     initAppAuthGate();
   })();
   </script>
