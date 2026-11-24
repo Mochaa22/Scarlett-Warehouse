@@ -59,9 +59,12 @@ interface AppAuthSessionPayload {
   role: AppAuthRole;
   iat: number;
   exp: number;
+  remember?: boolean;
 }
 
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const DEVICE_SESSION_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+const SLIDING_RENEWAL_INTERVAL_MS = 60 * 60 * 1000;
 const RATE_WINDOW_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 10;
 
@@ -633,18 +636,21 @@ function verifySessionToken(rawToken: string | null | undefined, secret: Buffer)
 function issueAppAuthToken(
   email: string,
   role: AppAuthRole,
-  secret: Buffer
-): { token: string; email: string; role: AppAuthRole; expiresAt: number } {
+  secret: Buffer,
+  rememberDevice = true
+): { token: string; email: string; role: AppAuthRole; expiresAt: number; rememberDevice: boolean } {
   const now = Date.now();
+  const ttl = rememberDevice ? DEVICE_SESSION_TTL_MS : SESSION_TTL_MS;
   const payload: AppAuthSessionPayload = {
     sub: email.trim().toLowerCase(),
     role,
     iat: now,
-    exp: now + SESSION_TTL_MS,
+    exp: now + ttl,
+    remember: rememberDevice,
   };
   const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
   const sig = crypto.createHmac('sha256', secret).update(`app:${body}`).digest('base64url');
-  return { token: `${body}.${sig}`, email: payload.sub, role, expiresAt: payload.exp };
+  return { token: `${body}.${sig}`, email: payload.sub, role, expiresAt: payload.exp, rememberDevice };
 }
 
 function verifyAppAuthToken(rawToken: string | null | undefined, secret: Buffer): AppAuthSessionPayload | null {
@@ -702,17 +708,23 @@ function isHttpsRequest(req: Request): boolean {
   return proto.includes('https');
 }
 
-function setAuthCookie(res: Response, req: Request, token: string): void {
-  const maxAgeSec = Math.floor(SESSION_TTL_MS / 1000);
+function setAuthCookie(res: Response, req: Request, token: string, persistent = true): void {
+  const maxAgeSec = Math.floor(DEVICE_SESSION_TTL_MS / 1000);
   const https = isHttpsRequest(req);
   const parts = [
     `${APP_AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
     'Path=/',
     'HttpOnly',
-    `Max-Age=${maxAgeSec}`,
-    https ? 'SameSite=None' : 'SameSite=Lax',
   ];
-  if (https) parts.push('Secure');
+  if (persistent) {
+    parts.push(`Max-Age=${maxAgeSec}`);
+    parts.push(`Expires=${new Date(Date.now() + DEVICE_SESSION_TTL_MS).toUTCString()}`);
+  }
+  parts.push(https ? 'SameSite=None' : 'SameSite=Lax');
+  if (https) {
+    parts.push('Secure');
+    parts.push('Partitioned');
+  }
   res.setHeader('Set-Cookie', parts.join('; '));
 }
 
@@ -723,9 +735,13 @@ function clearAuthCookie(res: Response, req: Request): void {
     'Path=/',
     'HttpOnly',
     'Max-Age=0',
+    'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
     https ? 'SameSite=None' : 'SameSite=Lax',
   ];
-  if (https) parts.push('Secure');
+  if (https) {
+    parts.push('Secure');
+    parts.push('Partitioned');
+  }
   res.setHeader('Set-Cookie', parts.join('; '));
 }
 
@@ -735,6 +751,26 @@ function extractBearerToken(req: Request): string | null {
     return authHeader.slice(7).trim() || null;
   }
   return null;
+}
+
+function hasExplicitAuthOrCustomHeader(req: Request): boolean {
+  return Boolean(
+    (typeof req.headers['x-app-auth'] === 'string' && req.headers['x-app-auth'].trim()) ||
+      extractBearerToken(req) ||
+      (typeof req.headers['x-requested-with'] === 'string' && req.headers['x-requested-with'].trim())
+  );
+}
+
+function isOriginSafeForCookieMutation(req: Request): boolean {
+  if (hasExplicitAuthOrCustomHeader(req)) return true;
+  const origin = String(req.headers.origin || '').trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
+  if (!origin || !host) return true;
+  try {
+    return new URL(origin).host.toLowerCase() === host;
+  } catch {
+    return false;
+  }
 }
 
 function extractValidAppAuthSession(req: Request, secret: Buffer): AppAuthSessionPayload | null {
@@ -759,20 +795,40 @@ function extractPinToken(req: Request): string | null {
   return extractBearerToken(req);
 }
 
-async function isAnyAuthConfigured(): Promise<boolean> {
-  if (getEnvAuth() || getEnvUsers().length > 0) return true;
-  if (await readStoredAuth()) return true;
-  const users = await readOperatorUsers();
-  return users.length > 0;
+async function getConfiguredAccountsInfo(): Promise<{
+  configured: boolean;
+  envManaged: boolean;
+  activeEmails: Set<string>;
+}> {
+  const envAuth = getEnvAuth();
+  const envUsers = getEnvUsers();
+  const [storedAuth, operatorUsers] = await Promise.all([readStoredAuth(), readOperatorUsers()]);
+  const activeEmails = new Set<string>();
+  if (envAuth) activeEmails.add(envAuth.email.toLowerCase());
+  for (const u of envUsers) activeEmails.add(u.email.toLowerCase());
+  if (storedAuth) activeEmails.add(storedAuth.email.toLowerCase());
+  for (const u of operatorUsers) activeEmails.add(u.email.toLowerCase());
+  return {
+    configured: activeEmails.size > 0,
+    envManaged: Boolean(envAuth),
+    activeEmails,
+  };
 }
 
 async function getAppAuthSessionIfAllowed(req: Request): Promise<{ satisfied: boolean; session: AppAuthSessionPayload | null }> {
-  const [configured, secret] = await Promise.all([isAnyAuthConfigured(), getSessionSecretAsync()]);
-  const session = extractValidAppAuthSession(req, secret);
-  if (!configured) {
-    return { satisfied: true, session };
+  const [accounts, secret] = await Promise.all([getConfiguredAccountsInfo(), getSessionSecretAsync()]);
+  const rawSession = extractValidAppAuthSession(req, secret);
+  const activeSession =
+    rawSession && (!accounts.configured || accounts.activeEmails.has(rawSession.sub.toLowerCase()))
+      ? rawSession
+      : null;
+  if (!accounts.configured) {
+    return { satisfied: true, session: activeSession };
   }
-  return { satisfied: Boolean(session), session };
+  if (req.method !== 'GET' && req.method !== 'HEAD' && !isOriginSafeForCookieMutation(req)) {
+    return { satisfied: false, session: null };
+  }
+  return { satisfied: Boolean(activeSession), session: activeSession };
 }
 
 function getClientKey(req: Request): string {
@@ -819,11 +875,13 @@ const verifyPinSchema = z.object({
 const appAuthCredsSchema = z.object({
   email: z.string().trim().email('Format email tidak valid').max(254),
   password: z.string().min(6, 'Password minimal 6 karakter').max(128),
+  rememberDevice: z.boolean().optional().default(true),
 });
 
 const appLoginSchema = z.object({
   email: z.string().trim().email('Format email tidak valid').max(254),
   password: z.string().min(1, 'Password wajib diisi').max(128),
+  rememberDevice: z.boolean().optional().default(true),
 });
 
 const upsertOperatorSchema = z.object({
@@ -929,20 +987,32 @@ export function createApp() {
   app.get(
     '/api/auth/status',
     asyncHandler(async (req: Request, res: Response) => {
-      const [envAuth, envUsers, storedAuth, operatorUsers, secret] = await Promise.all([
-        Promise.resolve(getEnvAuth()),
-        Promise.resolve(getEnvUsers()),
-        readStoredAuth(),
-        readOperatorUsers(),
-        getSessionSecretAsync(),
-      ]);
-      const session = extractValidAppAuthSession(req, secret);
+      const [accounts, secret] = await Promise.all([getConfiguredAccountsInfo(), getSessionSecretAsync()]);
+      const rawSession = extractValidAppAuthSession(req, secret);
+      const session =
+        rawSession && (!accounts.configured || accounts.activeEmails.has(rawSession.sub.toLowerCase()))
+          ? rawSession
+          : null;
+
+      let refreshedToken: string | null = null;
+      const rememberDevice = session ? session.remember !== false : true;
+      if (session && rememberDevice) {
+        const shouldRenew = session.remember === undefined || Date.now() - session.iat > SLIDING_RENEWAL_INTERVAL_MS;
+        if (shouldRenew) {
+          const issued = issueAppAuthToken(session.sub, session.role, secret, true);
+          refreshedToken = issued.token;
+          setAuthCookie(res, req, issued.token, true);
+        }
+      }
+
       res.json({
-        configured: Boolean(envAuth || envUsers.length > 0 || storedAuth || operatorUsers.length > 0),
-        envManaged: Boolean(envAuth),
+        configured: accounts.configured,
+        envManaged: accounts.envManaged,
         authenticated: Boolean(session),
         email: session?.sub ?? null,
         role: session?.role ?? null,
+        rememberDevice,
+        token: refreshedToken,
         storageMode: getStorageMode(),
         hasSessionSecret: hasStrongSessionSecret(),
       });
@@ -981,8 +1051,9 @@ export function createApp() {
       });
 
       const secret = await getSessionSecretAsync();
-      const issued = issueAppAuthToken(emailLower, 'stockkeeper', secret);
-      setAuthCookie(res, req, issued.token);
+      const rememberDevice = parsed.data.rememberDevice !== false;
+      const issued = issueAppAuthToken(emailLower, 'stockkeeper', secret, rememberDevice);
+      setAuthCookie(res, req, issued.token, rememberDevice);
       res.json(issued);
     })
   );
@@ -1062,8 +1133,9 @@ export function createApp() {
 
       clearFailures(rateKey);
       const secret = await getSessionSecretAsync();
-      const issued = issueAppAuthToken(matchedEmail, 'stockkeeper', secret);
-      setAuthCookie(res, req, issued.token);
+      const rememberDevice = parsed.data.rememberDevice !== false;
+      const issued = issueAppAuthToken(matchedEmail, 'stockkeeper', secret, rememberDevice);
+      setAuthCookie(res, req, issued.token, rememberDevice);
       res.json(issued);
     })
   );

@@ -107,33 +107,40 @@ export function initCloudBridge(): void {
         authenticated: boolean;
         email: string | null;
         role: 'stockkeeper' | 'admin' | 'super_admin' | null;
+        rememberDevice?: boolean;
+        token?: string | null;
         storageMode: StorageMode;
         hasSessionSecret: boolean;
       }> {
         const headers: Record<string, string> = {};
-        if (token) headers.Authorization = `Bearer ${token}`;
+        if (token) {
+          headers.Authorization = `Bearer ${token}`;
+          headers['X-App-Auth'] = token;
+        }
         return apiJson('/api/auth/status', { method: 'GET', headers, cache: 'no-store' }, 6000);
       },
 
       async setup(
         email: string,
-        password: string
-      ): Promise<{ token: string; email: string; role: 'stockkeeper' | 'admin' | 'super_admin'; expiresAt: number }> {
+        password: string,
+        rememberDevice = true
+      ): Promise<{ token: string; email: string; role: 'stockkeeper' | 'admin' | 'super_admin'; expiresAt: number; rememberDevice?: boolean }> {
         return apiJson('/api/auth/setup', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password }),
+          body: JSON.stringify({ email, password, rememberDevice }),
         });
       },
 
       async login(
         email: string,
-        password: string
-      ): Promise<{ token: string; email: string; role: 'stockkeeper' | 'admin' | 'super_admin'; expiresAt: number }> {
+        password: string,
+        rememberDevice = true
+      ): Promise<{ token: string; email: string; role: 'stockkeeper' | 'admin' | 'super_admin'; expiresAt: number; rememberDevice?: boolean }> {
         return apiJson('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password }),
+          body: JSON.stringify({ email, password, rememberDevice }),
         });
       },
 

@@ -4785,6 +4785,8 @@
 
     // === STATE UI, TEMA, TOAST & MODAL ===
     var AUTH_TOKEN_KEY = 'sgp1_auth_token';
+    var AUTH_SESSION_TOKEN_KEY = 'sgp1_auth_session_token';
+    var AUTH_REMEMBER_KEY = 'sgp1_auth_remember';
     var PIN_TOKEN_KEY = 'sgp1_pin_token';
     var PIN_ROLE_KEY = 'sgp1_pin_role';
     var ACTIVE_TAB_KEY = 'sgp1_active_tab';
@@ -4827,10 +4829,11 @@
     var lastRapidKeluarId = '';
     var settingsTab = 'role'; // 'role' | 'master' | 'tools'
 
-    // Sesi Login disimpan di HttpOnly cookie server + fallback token agar refresh browser tidak kembali ke login
-    var initialStoredAuthTok = safeGetRaw(AUTH_TOKEN_KEY) || '';
+    // Sesi Login disimpan di HttpOnly cookie server + token perangkat persisten agar device yang pernah login masuk otomatis
+    var initialStoredAuthTok = safeGetRaw(AUTH_TOKEN_KEY) || sessionGetRaw(AUTH_SESSION_TOKEN_KEY) || '';
     if (initialStoredAuthTok && !decodeTokenPayload(initialStoredAuthTok)) {
       safeDel(AUTH_TOKEN_KEY);
+      sessionSetRaw(AUTH_SESSION_TOKEN_KEY, '');
       initialStoredAuthTok = '';
     }
     var initialStoredPinTok = sessionGetRaw(PIN_TOKEN_KEY) || '';
@@ -4842,6 +4845,7 @@
       initialStoredPinRole = '';
     }
 
+    var appAuthRememberDevice = safeGetRaw(AUTH_REMEMBER_KEY) !== '0';
     var appAuthToken = initialStoredAuthTok;
     var appAuthEmail = (decodeTokenPayload(initialStoredAuthTok) && decodeTokenPayload(initialStoredAuthTok).sub) || '';
     var appAuthSessionRole = null; // null | 'stockkeeper' | 'admin' | 'super_admin'
@@ -4862,10 +4866,22 @@
       return window.__sgpCloud || null;
     }
 
-    function persistAppAuthToken(tok) {
+    function persistAppAuthToken(tok, rememberOpt) {
       appAuthToken = String(tok || '').trim();
-      if (appAuthToken) safeSetRaw(AUTH_TOKEN_KEY, appAuthToken);
-      else safeDel(AUTH_TOKEN_KEY);
+      if (typeof rememberOpt === 'boolean') {
+        appAuthRememberDevice = rememberOpt;
+        safeSetRaw(AUTH_REMEMBER_KEY, rememberOpt ? '1' : '0');
+      }
+      if (!appAuthToken) {
+        safeDel(AUTH_TOKEN_KEY);
+        sessionSetRaw(AUTH_SESSION_TOKEN_KEY, '');
+      } else if (appAuthRememberDevice) {
+        safeSetRaw(AUTH_TOKEN_KEY, appAuthToken);
+        sessionSetRaw(AUTH_SESSION_TOKEN_KEY, '');
+      } else {
+        sessionSetRaw(AUTH_SESSION_TOKEN_KEY, appAuthToken);
+        safeDel(AUTH_TOKEN_KEY);
+      }
     }
 
     function safeSetRaw(key, val) {
@@ -12781,20 +12797,27 @@
         ? '<div class="inline-alert err" style="margin-bottom:12px">' + esc(errorText) + '</div>'
         : '';
 
+      var rememberCheckboxHtml = '<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-muted);margin-bottom:14px;cursor:pointer;user-select:none">' +
+        '<input id="login-remember-device" type="checkbox" style="width:16px;height:16px;accent-color:var(--accent);flex-shrink:0"' + (appAuthRememberDevice ? ' checked' : '') + ' />' +
+        '<span>Ingat perangkat ini (otomatis masuk tanpa login ulang)</span>' +
+        '</label>';
+
       if (!appAuthStatusCache.configured && !appAuthStatusCache.envManaged) {
         body.innerHTML = errHtml +
           '<div class="inline-alert info" style="margin-bottom:14px;font-size:12.5px">Belum ada akun login server yang dikonfigurasi. Buat akun email &amp; password awal untuk masuk sebagai Stockkeeper.</div>' +
           '<form id="form-app-setup-login">' +
           '<div class="field" style="margin-bottom:12px"><label for="login-setup-email">Email</label><input id="login-setup-email" type="email" class="input" required autocomplete="username" placeholder="nama@email.com" /></div>' +
           '<div class="field" style="margin-bottom:12px"><label for="login-setup-pw">Password (min. 6 karakter)</label><div class="login-pw-wrap"><input id="login-setup-pw" type="password" class="input" required minlength="6" maxlength="128" autocomplete="new-password" placeholder="Masukkan password" /><button type="button" class="login-pw-toggle" data-toggle-pw="login-setup-pw">Lihat</button></div></div>' +
-          '<div class="field" style="margin-bottom:16px"><label for="login-setup-pw2">Konfirmasi Password</label><input id="login-setup-pw2" type="password" class="input" required minlength="6" maxlength="128" autocomplete="new-password" placeholder="Ulangi password" /></div>' +
+          '<div class="field" style="margin-bottom:12px"><label for="login-setup-pw2">Konfirmasi Password</label><input id="login-setup-pw2" type="password" class="input" required minlength="6" maxlength="128" autocomplete="new-password" placeholder="Ulangi password" /></div>' +
+          rememberCheckboxHtml +
           '<button type="submit" class="btn btn-primary" style="width:100%" id="login-submit-btn">Simpan Akun &amp; Masuk</button>' +
           '</form>';
       } else {
         body.innerHTML = errHtml +
           '<form id="form-app-login">' +
           '<div class="field" style="margin-bottom:12px"><label for="login-email">Email</label><input id="login-email" type="email" class="input" required autocomplete="username" placeholder="Masukkan email" /></div>' +
-          '<div class="field" style="margin-bottom:16px"><label for="login-password">Password</label><div class="login-pw-wrap"><input id="login-password" type="password" class="input" required maxlength="128" autocomplete="current-password" placeholder="Masukkan password" /><button type="button" class="login-pw-toggle" data-toggle-pw="login-password">Lihat</button></div></div>' +
+          '<div class="field" style="margin-bottom:12px"><label for="login-password">Password</label><div class="login-pw-wrap"><input id="login-password" type="password" class="input" required maxlength="128" autocomplete="current-password" placeholder="Masukkan password" /><button type="button" class="login-pw-toggle" data-toggle-pw="login-password">Lihat</button></div></div>' +
+          rememberCheckboxHtml +
           '<button type="submit" class="btn btn-primary" style="width:100%" id="login-submit-btn">Masuk</button>' +
           '</form>';
       }
@@ -12825,6 +12848,8 @@
           var emailVal = document.getElementById('login-setup-email').value.trim();
           var pw1 = document.getElementById('login-setup-pw').value;
           var pw2 = document.getElementById('login-setup-pw2').value;
+          var rememberEl = document.getElementById('login-remember-device');
+          var rememberVal = rememberEl ? Boolean(rememberEl.checked) : true;
           if (pw1 !== pw2) {
             renderLoginScreen('Konfirmasi password tidak cocok.');
             return;
@@ -12836,7 +12861,7 @@
               method: 'POST',
               credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email: emailVal, password: pw1 })
+              body: JSON.stringify({ email: emailVal, password: pw1, rememberDevice: rememberVal })
             });
             var data = await readJsonSafe(res);
             if (res.status === 409) {
@@ -12846,21 +12871,21 @@
                 method: 'POST',
                 credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email: emailVal, password: pw1 })
+                body: JSON.stringify({ email: emailVal, password: pw1, rememberDevice: rememberVal })
               });
               var loginData = await readJsonSafe(loginRes);
               if (!loginRes.ok) {
                 throw new Error((loginData && loginData.error) || 'Akun login sudah aktif di server. Silakan masuk dengan email & password yang benar.');
               }
               authTransitionSeq += 1;
-              persistAppAuthToken(loginData.token);
+              persistAppAuthToken(loginData.token, loginData.rememberDevice !== undefined ? Boolean(loginData.rememberDevice) : rememberVal);
               setAuthUnlockedState(true, loginData.email, loginData.role, { freshLogin: true });
               showToast('Berhasil masuk sebagai Stockkeeper (' + loginData.email + ')', 'ok');
               return;
             }
             if (!res.ok) throw new Error(data.error || 'Gagal menyimpan akun login.');
             authTransitionSeq += 1;
-            persistAppAuthToken(data.token);
+            persistAppAuthToken(data.token, data.rememberDevice !== undefined ? Boolean(data.rememberDevice) : rememberVal);
             appAuthStatusCache.configured = true;
             setAuthUnlockedState(true, data.email, data.role, { freshLogin: true });
             showToast('Akun login berhasil dibuat (Role: Stockkeeper)', 'ok');
@@ -12878,6 +12903,8 @@
           e.preventDefault();
           var emailVal = document.getElementById('login-email').value.trim();
           var pwVal = document.getElementById('login-password').value;
+          var rememberEl = document.getElementById('login-remember-device');
+          var rememberVal = rememberEl ? Boolean(rememberEl.checked) : true;
           var btn = document.getElementById('login-submit-btn');
           if (btn) btn.disabled = true;
           try {
@@ -12885,7 +12912,7 @@
               method: 'POST',
               credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email: emailVal, password: pwVal })
+              body: JSON.stringify({ email: emailVal, password: pwVal, rememberDevice: rememberVal })
             });
             var data = await readJsonSafe(res);
             if (!res.ok) {
@@ -12895,7 +12922,7 @@
               throw new Error((data && data.error) || 'Email atau password salah.');
             }
             authTransitionSeq += 1;
-            persistAppAuthToken(data.token);
+            persistAppAuthToken(data.token, data.rememberDevice !== undefined ? Boolean(data.rememberDevice) : rememberVal);
             setAuthUnlockedState(true, data.email, data.role, { freshLogin: true });
             showToast('Berhasil masuk sebagai Stockkeeper (' + data.email + ')', 'ok');
           } catch (err) {
@@ -12960,7 +12987,13 @@
             authenticated: Boolean(st.authenticated)
           };
           if (st.authenticated && st.email) {
+            if (st.token) {
+              persistAppAuthToken(st.token, st.rememberDevice !== false);
+            }
             setAuthUnlockedState(true, st.email, st.role);
+            if (pinSessionToken && !pinStatusCache.loaded) {
+              void refreshPinStatus();
+            }
           } else {
             setAuthUnlockedState(false, '', null, { clearSyncState: !sharedSyncState.pending });
             if (wasAuthenticated) {
@@ -13001,7 +13034,7 @@
       }
     }
 
-    async function initAppAuthGate() {
+    async function initAppAuthGate(hadValidLocalSession) {
       var logoutBtn = document.getElementById('app-logout-btn');
       if (logoutBtn) {
         logoutBtn.addEventListener('click', function () {
@@ -13016,7 +13049,7 @@
               fetch('/api/auth/logout', {
                 method: 'POST',
                 credentials: 'same-origin',
-                headers: tok ? { Authorization: 'Bearer ' + tok } : {}
+                headers: tok ? { Authorization: 'Bearer ' + tok, 'X-App-Auth': tok } : {}
               }).catch(function () {});
               renderLoginScreen('');
               showToast('Anda telah keluar dari aplikasi', 'info');
@@ -13063,13 +13096,20 @@
         }
       });
 
-      await syncAppAuthStatus(false);
+      await syncAppAuthStatus(Boolean(hadValidLocalSession));
     }
 
     // Boot
     applyTheme(safeGet(THEME_KEY, 'auto'));
-    try { renderApp(); } catch (bootErr) { console.error(bootErr); }
-    initAppAuthGate();
+    var bootAuthPayload = decodeTokenPayload(appAuthToken);
+    if (bootAuthPayload && bootAuthPayload.sub) {
+      appAuthStatusCache.loaded = true;
+      appAuthStatusCache.configured = true;
+      setAuthUnlockedState(true, bootAuthPayload.sub, bootAuthPayload.role || 'stockkeeper', { skipRemoteCheck: true });
+    } else {
+      try { renderApp(); } catch (bootErr) { console.error(bootErr); }
+    }
+    initAppAuthGate(Boolean(bootAuthPayload && bootAuthPayload.sub));
   })();
   </script>
   <script type="module" src="/src/main.tsx"></script>
