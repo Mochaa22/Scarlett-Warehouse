@@ -9,3 +9,4 @@ coverage/
 .vercel/
 .data/
 DRAFT_firestore.rules
+.aistudio/
