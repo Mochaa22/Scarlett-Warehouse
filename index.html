@@ -226,8 +226,10 @@
     }
 
     .brand-logo {
-      width: 34px;
+      width: auto;
+      min-width: 34px;
       height: 34px;
+      padding: 0 7px;
       border-radius: 10px;
       background: #b5154f;
       color: #ffffff;
@@ -1840,7 +1842,7 @@
       .grid-2, .grid-3 { grid-template-columns: 1fr; }
       .main-content { padding: 16px 14px calc(var(--dock-h) + 28px + env(safe-area-inset-bottom)); }
       .header-inner { padding: 0 14px; }
-      .brand-logo { width: 30px; height: 30px; font-size: 12px; border-radius: 8px; }
+      .brand-logo { width: auto; min-width: 30px; height: 30px; padding: 0 6px; font-size: 12px; border-radius: 8px; }
       .wh-select { max-width: 155px; min-height: 36px; font-size: 12.5px; padding: 6px 8px; }
       .icon-btn { min-height: 36px; padding: 6px 10px; font-size: 12.5px; }
       .toast-wrap { bottom: calc(var(--dock-h) + 12px + env(safe-area-inset-bottom)); }
@@ -1946,11 +1948,13 @@
     .login-gate {
       display: none;
       min-height: 100vh;
+      min-height: 100dvh;
       align-items: center;
       justify-content: center;
-      padding: 20px;
+      padding: 28px 20px;
       background:
-        radial-gradient(circle at top right, var(--accent-soft), transparent 46%),
+        radial-gradient(ellipse 68% 55% at 14% 12%, var(--accent-soft), transparent 60%),
+        radial-gradient(ellipse 52% 48% at 88% 90%, var(--accent-soft), transparent 62%),
         var(--bg);
     }
 
@@ -1960,32 +1964,173 @@
 
     .login-card {
       width: 100%;
-      max-width: 410px;
+      max-width: 880px;
+      display: grid;
+      grid-template-columns: 1.04fr 1fr;
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: var(--radius);
+      border-radius: 18px;
       box-shadow: var(--shadow-md);
-      padding: 26px 24px;
+      overflow: hidden;
+    }
+
+    .login-showcase {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 28px;
+      padding: 36px 34px;
+      background:
+        radial-gradient(circle at 0% 0%, var(--accent-soft), transparent 64%),
+        var(--surface-2);
+      border-right: 1px solid var(--border);
     }
 
     .login-brand {
       display: flex;
       align-items: center;
-      gap: 12px;
-      margin-bottom: 18px;
+      gap: 13px;
+    }
+
+    .login-logo-mark {
+      width: 44px;
+      height: 44px;
+      flex-shrink: 0;
+      border-radius: 12px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(145deg, #c91859 0%, #980f41 100%);
+      box-shadow: 0 8px 18px -6px rgba(181, 21, 79, 0.52), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+      color: #ffffff;
+    }
+
+    .login-logo-mark svg {
+      width: 26px;
+      height: 26px;
+      display: block;
     }
 
     .login-brand-title {
       font-size: 18px;
       font-weight: 700;
+      letter-spacing: -0.02em;
       color: var(--text);
       line-height: 1.2;
     }
 
     .login-brand-sub {
       font-size: 12.5px;
+      font-weight: 500;
       color: var(--text-subtle);
       margin-top: 2px;
+    }
+
+    .login-hero-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .login-headline {
+      margin: 0;
+      font-size: 23px;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      line-height: 1.24;
+      color: var(--text);
+      text-wrap: balance;
+    }
+
+    .login-lead {
+      margin: 0;
+      font-size: 13.5px;
+      line-height: 1.55;
+      color: var(--text-muted);
+    }
+
+    .login-feature-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      border-top: 1px solid var(--border);
+    }
+
+    .login-feature-item {
+      padding: 12px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .login-feature-item:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .login-feature-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.35;
+    }
+
+    .login-feature-desc {
+      margin-top: 2px;
+      font-size: 12.5px;
+      line-height: 1.45;
+      color: var(--text-subtle);
+    }
+
+    .login-form-pane {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 36px 34px;
+      background: var(--surface);
+    }
+
+    .login-form-head {
+      margin-bottom: 20px;
+    }
+
+    .login-form-title {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      line-height: 1.25;
+    }
+
+    .login-form-desc {
+      margin: 5px 0 0;
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-subtle);
+    }
+
+    .login-gate .field {
+      margin-bottom: 14px;
+    }
+
+    .login-gate .field label {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      display: block;
+    }
+
+    .login-gate .input {
+      min-height: 44px;
+      border-radius: 10px;
+      font-size: 14px;
+      transition: border-color 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease;
+    }
+
+    .login-gate .input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
     }
 
     .login-pw-wrap {
@@ -1995,48 +2140,159 @@
     }
 
     .login-pw-wrap .input {
-      padding-right: 72px;
+      padding-right: 74px;
     }
 
     .login-pw-toggle {
       position: absolute;
-      right: 8px;
+      right: 7px;
       background: transparent;
       border: 0;
       color: var(--text-muted);
       font-size: 12px;
       font-weight: 600;
       cursor: pointer;
-      padding: 4px 8px;
-      border-radius: 6px;
+      padding: 6px 10px;
+      border-radius: 7px;
+      transition: background-color 0.15s ease, color 0.15s ease;
     }
 
     .login-pw-toggle:hover {
       background: var(--surface-2);
       color: var(--text);
     }
+
+    .login-remember-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      font-size: 12.5px;
+      line-height: 1.4;
+      color: var(--text-muted);
+      margin: 4px 0 18px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .login-remember-row input {
+      width: 16px;
+      height: 16px;
+      margin-top: 1px;
+      accent-color: var(--accent);
+      flex-shrink: 0;
+      cursor: pointer;
+    }
+
+    .login-submit-cta {
+      width: 100%;
+      min-height: 46px;
+      font-size: 14px;
+      font-weight: 600;
+      border-radius: 10px;
+      transition: background-color 0.16s ease, transform 0.14s ease, box-shadow 0.16s ease;
+    }
+
+    .login-submit-cta:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 18px -6px rgba(181, 21, 79, 0.42);
+    }
+
+    .login-submit-cta:active:not(:disabled) {
+      transform: translateY(0);
+    }
+
+    @media (max-width: 820px) {
+      .login-gate {
+        padding: 16px;
+        align-items: center;
+      }
+      .login-card {
+        max-width: 430px;
+        grid-template-columns: 1fr;
+        border-radius: 16px;
+      }
+      .login-showcase {
+        gap: 12px;
+        padding: 22px 22px 18px;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .login-headline {
+        font-size: 18px;
+      }
+      .login-lead,
+      .login-feature-list {
+        display: none;
+      }
+      .login-form-pane {
+        padding: 22px;
+      }
+      .login-form-head {
+        margin-bottom: 16px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .login-gate .input,
+      .login-pw-toggle,
+      .login-submit-cta {
+        transition: none;
+      }
+      .login-submit-cta:hover:not(:disabled) {
+        transform: none;
+      }
+    }
   </style>
 </head>
 <body class="auth-locked">
   <main id="app-login-screen" class="login-gate" aria-label="Masuk aplikasi">
     <div class="login-card">
-      <div class="login-brand">
-        <div class="brand-logo" aria-hidden="true">GP1</div>
-        <div>
-          <div class="login-brand-title">Scarlett GP1 WMS</div>
-          <div class="login-brand-sub">Sistem Manajemen Gudang</div>
+      <section class="login-showcase" aria-label="Tentang Sarlett Inventory">
+        <div class="login-brand">
+          <div class="login-logo-mark" id="login-brand-logo" aria-hidden="true">
+            <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M21.8 10.6C20.5 8.9 18.4 8 15.9 8C12.2 8 9.6 10.1 9.6 13.1C9.6 16 11.9 17.2 15.8 18C19.1 18.7 20.4 19.5 20.4 21.3C20.4 23.1 18.7 24.3 16 24.3C13.5 24.3 11.4 23.2 10 21.4" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M23.5 6.8L24.5 9.1L26.8 10.1L24.5 11.1L23.5 13.4L22.5 11.1L20.2 10.1L22.5 9.1L23.5 6.8Z" fill="currentColor" fill-opacity="0.92"/>
+            </svg>
+          </div>
+          <div>
+            <div class="login-brand-title" id="login-brand-title">Sarlett Inventory</div>
+            <div class="login-brand-sub">Sistem Manajemen Gudang</div>
+          </div>
         </div>
-      </div>
-      <div id="app-login-body">
-        <p class="muted" style="font-size:13px;margin:0">Memeriksa sesi login…</p>
-      </div>
+
+        <div class="login-hero-copy">
+          <p class="login-lead">Kelola barang masuk, keluar, mutasi antar gudang, surat jalan, hingga stok opname dengan data yang selalu selaras.</p>
+        </div>
+
+        <ul class="login-feature-list">
+          <li class="login-feature-item">
+            <div class="login-feature-title">Sinkronisasi Gudang Real-Time</div>
+            <div class="login-feature-desc">Perubahan stok dan transaksi langsung tersinkron antar perangkat.</div>
+          </li>
+          <li class="login-feature-item">
+            <div class="login-feature-title">Kontrol Akses Berlapis</div>
+            <div class="login-feature-desc">Masuk cepat sebagai Stockkeeper dengan pengaman PIN Admin dan Super Admin.</div>
+          </li>
+          <li class="login-feature-item">
+            <div class="login-feature-title">Ekspor Excel &amp; Input Massal</div>
+            <div class="login-feature-desc">Unduh database rapi multi-sheet serta input barang masuk dan keluar sekaligus.</div>
+          </li>
+        </ul>
+      </section>
+
+      <section class="login-form-pane">
+        <div id="app-login-body">
+          <p class="muted" style="font-size:13px;margin:0">Memeriksa sesi login…</p>
+        </div>
+      </section>
     </div>
   </main>
 
   <header class="app-header">
     <div class="header-inner">
       <div class="brand-group">
-        <div class="brand-logo" aria-hidden="true">GP1</div>
+        <div class="brand-logo" id="hdr-brand-logo" aria-hidden="true">GP1</div>
         <div class="brand-meta">
           <div class="brand-title" id="hdr-title">Scarlett GP1</div>
           <div class="brand-sub" id="hdr-sub">Memuat data gudang…</div>
@@ -6344,12 +6600,40 @@
       renderModalBody();
     }
 
+    function formatWarehouseBadgeCode(name) {
+      var clean = String(name || '').trim().toUpperCase();
+      if (!clean) return 'WH';
+      var words = clean.split(/[\s\-_/]+/).filter(Boolean);
+      for (var i = words.length - 1; i >= 0; i--) {
+        if (/^[A-Z0-9]{2,4}$/.test(words[i]) && /\d/.test(words[i])) {
+          return words[i];
+        }
+      }
+      var filtered = words.length > 1 && words[0] === 'SCARLETT' ? words.slice(1) : words;
+      if (filtered.length === 1) {
+        return filtered[0].slice(0, 4);
+      }
+      if (filtered.length >= 2 && filtered[filtered.length - 1].length === 1) {
+        return filtered[0].charAt(0) + filtered[filtered.length - 1];
+      }
+      var initials = filtered.map(function (w) { return w.charAt(0); }).join('').slice(0, 3);
+      return initials || clean.slice(0, 3);
+    }
+
     // === RENDER HEADER & NAVIGASI ===
     function renderChrome(analysis) {
       var activeRole = enforceRoleRouteGuard();
       var options = getSelectableWarehouses(activeRole);
       var d = options.length ? curData() : defaultWhData();
-      document.getElementById('hdr-title').textContent = options.length ? getWhMeta(W.cur).nama : 'Gudang';
+      var activeWhName = options.length ? getWhMeta(W.cur).nama : 'Gudang';
+      var badgeCode = formatWarehouseBadgeCode(activeWhName);
+      var hdrBadgeEl = document.getElementById('hdr-brand-logo');
+      if (hdrBadgeEl) {
+        hdrBadgeEl.textContent = badgeCode;
+        hdrBadgeEl.title = activeWhName;
+      }
+
+      document.getElementById('hdr-title').textContent = activeWhName;
       document.getElementById('hdr-sub').textContent =
         ROLE_LABELS[activeRole] + ' · ' + (d.mode === 'all' ? 'ALL STOCK + Baru' : 'Mutasi') + ' · ' + W.user;
 
@@ -12794,31 +13078,38 @@
       }
 
       var errHtml = errorText
-        ? '<div class="inline-alert err" style="margin-bottom:12px">' + esc(errorText) + '</div>'
+        ? '<div class="inline-alert err" style="margin-bottom:14px">' + esc(errorText) + '</div>'
         : '';
 
-      var rememberCheckboxHtml = '<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-muted);margin-bottom:14px;cursor:pointer;user-select:none">' +
-        '<input id="login-remember-device" type="checkbox" style="width:16px;height:16px;accent-color:var(--accent);flex-shrink:0"' + (appAuthRememberDevice ? ' checked' : '') + ' />' +
+      var rememberCheckboxHtml = '<label class="login-remember-row" for="login-remember-device">' +
+        '<input id="login-remember-device" type="checkbox"' + (appAuthRememberDevice ? ' checked' : '') + ' />' +
         '<span>Ingat perangkat ini (otomatis masuk tanpa login ulang)</span>' +
         '</label>';
 
       if (!appAuthStatusCache.configured && !appAuthStatusCache.envManaged) {
-        body.innerHTML = errHtml +
-          '<div class="inline-alert info" style="margin-bottom:14px;font-size:12.5px">Belum ada akun login server yang dikonfigurasi. Buat akun email &amp; password awal untuk masuk sebagai Stockkeeper.</div>' +
+        body.innerHTML =
+          '<div class="login-form-head">' +
+          '<h2 class="login-form-title">Pengaturan Akun Awal</h2>' +
+          '<p class="login-form-desc">Buat akun email dan password pertama untuk masuk sebagai Stockkeeper.</p>' +
+          '</div>' +
+          errHtml +
           '<form id="form-app-setup-login">' +
-          '<div class="field" style="margin-bottom:12px"><label for="login-setup-email">Email</label><input id="login-setup-email" type="email" class="input" required autocomplete="username" placeholder="nama@email.com" /></div>' +
-          '<div class="field" style="margin-bottom:12px"><label for="login-setup-pw">Password (min. 6 karakter)</label><div class="login-pw-wrap"><input id="login-setup-pw" type="password" class="input" required minlength="6" maxlength="128" autocomplete="new-password" placeholder="Masukkan password" /><button type="button" class="login-pw-toggle" data-toggle-pw="login-setup-pw">Lihat</button></div></div>' +
-          '<div class="field" style="margin-bottom:12px"><label for="login-setup-pw2">Konfirmasi Password</label><input id="login-setup-pw2" type="password" class="input" required minlength="6" maxlength="128" autocomplete="new-password" placeholder="Ulangi password" /></div>' +
+          '<div class="field"><label for="login-setup-email">Email</label><input id="login-setup-email" type="email" class="input" required autocomplete="username" placeholder="nama@email.com" /></div>' +
+          '<div class="field"><label for="login-setup-pw">Password (min. 6 karakter)</label><div class="login-pw-wrap"><input id="login-setup-pw" type="password" class="input" required minlength="6" maxlength="128" autocomplete="new-password" placeholder="Masukkan password" /><button type="button" class="login-pw-toggle" data-toggle-pw="login-setup-pw">Lihat</button></div></div>' +
+          '<div class="field"><label for="login-setup-pw2">Konfirmasi Password</label><input id="login-setup-pw2" type="password" class="input" required minlength="6" maxlength="128" autocomplete="new-password" placeholder="Ulangi password" /></div>' +
           rememberCheckboxHtml +
-          '<button type="submit" class="btn btn-primary" style="width:100%" id="login-submit-btn">Simpan Akun &amp; Masuk</button>' +
+          '<button type="submit" class="btn btn-primary login-submit-cta" id="login-submit-btn">Simpan Akun &amp; Masuk</button>' +
           '</form>';
       } else {
-        body.innerHTML = errHtml +
+        body.innerHTML =
+          '<div class="login-form-head">' +
+          '</div>' +
+          errHtml +
           '<form id="form-app-login">' +
-          '<div class="field" style="margin-bottom:12px"><label for="login-email">Email</label><input id="login-email" type="email" class="input" required autocomplete="username" placeholder="Masukkan email" /></div>' +
-          '<div class="field" style="margin-bottom:12px"><label for="login-password">Password</label><div class="login-pw-wrap"><input id="login-password" type="password" class="input" required maxlength="128" autocomplete="current-password" placeholder="Masukkan password" /><button type="button" class="login-pw-toggle" data-toggle-pw="login-password">Lihat</button></div></div>' +
+          '<div class="field"><label for="login-email">Email</label><input id="login-email" type="email" class="input" required autocomplete="username" placeholder="nama@perusahaan.com" /></div>' +
+          '<div class="field"><label for="login-password">Password</label><div class="login-pw-wrap"><input id="login-password" type="password" class="input" required maxlength="128" autocomplete="current-password" placeholder="Masukkan password" /><button type="button" class="login-pw-toggle" data-toggle-pw="login-password">Lihat</button></div></div>' +
           rememberCheckboxHtml +
-          '<button type="submit" class="btn btn-primary" style="width:100%" id="login-submit-btn">Masuk</button>' +
+          '<button type="submit" class="btn btn-primary login-submit-cta" id="login-submit-btn">Masuk</button>' +
           '</form>';
       }
 
