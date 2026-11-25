@@ -90,6 +90,15 @@ export interface SearchFilterState {
   [key: string]: string;
 }
 
+export interface ReportFilterState {
+  category: string;
+  period: string;
+  from: string;
+  to: string;
+  status: string;
+  q: string;
+}
+
 export interface NavItem {
   id: string;
   label: string;

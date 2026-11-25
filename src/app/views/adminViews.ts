@@ -6,7 +6,7 @@ import { ROLE_LABELS, appState, renderApp } from '../state/store.ts';
 import { closeTextModal, confirmDialog, iconSvg, openCopyTSV, openTextModal, pageHeaderHtml, showToast } from '../ui/feedback.ts';
 import { defaultTabForRole, getEffectiveRole, persistPinSession, refreshPinStatus } from '../ui/rbac.ts';
 import { defaultCutoffISO, esc, fmtNum, inferProductCategory, normBarcode, normLoc, normSku, parseDate, parseQty } from '../utils/format.ts';
-import { byId } from '../utils/dom.ts';
+import { byId, targetEl } from '../utils/dom.ts';
 
 // === HALAMAN 11: KELOLA GUDANG ===
 export function renderKelolaGudang(root) {
@@ -198,22 +198,155 @@ export function renderMasterImpor(root, d) {
     '</div>';
 
   // Pratinjau Master Barang & Lokasi
+  var masterQ = (appState.masterSearch || '').trim().toUpperCase();
+  var masterRowsWithIdx = (d.master || []).map(function (m, idx) {
+    return { item: m, idx: idx };
+  }).filter(function (entry) {
+    if (!masterQ) return true;
+    var m = entry.item;
+    return [m.barcode, m.sku, m.nama, inferProductCategory(m.nama, m.kategori)].join(' ').toUpperCase().indexOf(masterQ) >= 0;
+  });
+
   html += '<div class="grid-2">' +
-    '<div class="card"><div class="card-header"><h2 class="card-title">Master Barang Tersimpan</h2><button type="button" class="btn btn-sm" id="copy-master-btn">Salin TSV</button></div>' +
-    '<div class="table-wrap" style="max-height:260px"><table><thead><tr><th>Barcode</th><th>SKU</th><th>Nama Produk</th><th>Kategori</th></tr></thead><tbody>' +
-    (d.master.length ? d.master.slice(0, 100).map(function (m) {
-      return '<tr><td class="mono">' + esc(m.barcode) + '</td><td class="mono">' + esc(m.sku) + '</td><td>' + esc(m.nama) + '</td><td>' + esc(inferProductCategory(m.nama, m.kategori)) + '</td></tr>';
-    }).join('') : '<tr><td colspan="4" class="muted" style="text-align:center">Belum ada Master Barang.</td></tr>') +
+    '<div class="card"><div class="card-header"><h2 class="card-title">Master Barang Tersimpan</h2>' +
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+    '<span class="badge badge-neutral">' + fmtNum(masterRowsWithIdx.length) + '/' + fmtNum(d.master.length) + '</span>' +
+    '<button type="button" class="btn btn-sm" id="copy-master-btn">Salin TSV</button>' +
+    '</div></div>' +
+    '<div class="toolbar" style="margin-bottom:10px">' +
+    '<div class="search-wrap" style="max-width:none"><input id="search-master" type="search" class="input" placeholder="Cari barcode, SKU, nama produk, kategori…" value="' + esc(appState.masterSearch || '') + '" /><span class="search-kbd">/</span></div>' +
+    '</div>' +
+    '<div class="table-wrap" style="max-height:360px"><table><thead><tr><th>Barcode</th><th>SKU</th><th>Nama Produk</th><th>Kategori</th><th class="right">Aksi</th></tr></thead><tbody>' +
+    (masterRowsWithIdx.length ? masterRowsWithIdx.map(function (entry) {
+      var m = entry.item;
+      return '<tr>' +
+        '<td class="mono">' + esc(m.barcode) + '</td>' +
+        '<td class="mono">' + esc(m.sku) + '</td>' +
+        '<td>' + esc(m.nama) + '</td>' +
+        '<td>' + esc(inferProductCategory(m.nama, m.kategori)) + '</td>' +
+        '<td class="right"><button type="button" class="btn btn-sm btn-danger" data-del-master-idx="' + entry.idx + '">Hapus</button></td>' +
+        '</tr>';
+    }).join('') : '<tr><td colspan="5" class="muted" style="text-align:center">' + (d.master.length ? 'Tidak ada barang yang cocok dengan pencarian.' : 'Belum ada Master Barang.') + '</td></tr>') +
     '</tbody></table></div></div>' +
 
     '<div class="card"><div class="card-header"><h2 class="card-title">Master Lokasi Tersimpan</h2><button type="button" class="btn btn-sm" id="copy-lokasi-btn">Salin TSV</button></div>' +
-    '<div class="table-wrap" style="max-height:260px"><table><thead><tr><th>Lokasi</th></tr></thead><tbody>' +
+    '<div class="table-wrap" style="max-height:360px"><table><thead><tr><th>Lokasi</th></tr></thead><tbody>' +
     (d.lokasi.length ? d.lokasi.map(function (l) {
       return '<tr><td>' + esc(l) + '</td></tr>';
     }).join('') : '<tr><td class="muted" style="text-align:center">Belum ada Master Lokasi.</td></tr>') +
     '</tbody></table></div></div></div>';
 
   root.innerHTML = html;
+
+  function matchesMasterRecord(rec: any, targetItem: any) {
+    if (!rec || !targetItem) return false;
+    var tSku = normSku(targetItem.sku);
+    var tBc = normBarcode(targetItem.barcode);
+    var rSku = normSku(rec.sku);
+    var rBc = normBarcode(rec.barcode);
+    if (tSku === '5000054' && tBc) {
+      return rSku === tSku && (!rBc || rBc === tBc);
+    }
+    if (tBc && rBc && tBc === rBc) return true;
+    if (tSku && rSku && tSku === rSku) return true;
+    return false;
+  }
+
+  function getMasterItemTransactionUsage(whData: any, targetItem: any) {
+    var counts = {
+      masuk: 0,
+      keluar: 0,
+      pindah: 0,
+      defect: 0,
+      inboundRegister: 0,
+      batches: 0,
+      cycleCounts: 0
+    };
+    (whData.masuk || []).forEach(function (r) { if (matchesMasterRecord(r, targetItem)) counts.masuk++; });
+    (whData.keluar || []).forEach(function (r) { if (matchesMasterRecord(r, targetItem)) counts.keluar++; });
+    (whData.pindah || []).forEach(function (r) { if (matchesMasterRecord(r, targetItem)) counts.pindah++; });
+    (whData.defect || []).forEach(function (r) { if (matchesMasterRecord(r, targetItem)) counts.defect++; });
+    (whData.inboundRegister || []).forEach(function (r) { if (matchesMasterRecord(r, targetItem)) counts.inboundRegister++; });
+    (whData.batches || []).forEach(function (r) { if (matchesMasterRecord(r, targetItem)) counts.batches++; });
+    (whData.cycleCounts || []).forEach(function (sess) {
+      (sess.items || []).forEach(function (it) {
+        if (matchesMasterRecord(it, targetItem)) counts.cycleCounts++;
+      });
+    });
+    var details: string[] = [];
+    if (counts.masuk) details.push(counts.masuk + ' Barang Masuk');
+    if (counts.keluar) details.push(counts.keluar + ' Barang Keluar');
+    if (counts.pindah) details.push(counts.pindah + ' Perpindahan');
+    if (counts.inboundRegister) details.push(counts.inboundRegister + ' Surat Jalan');
+    if (counts.defect) details.push(counts.defect + ' Defect/Karantina');
+    if (counts.batches) details.push(counts.batches + ' Batch Expire');
+    if (counts.cycleCounts) details.push(counts.cycleCounts + ' Cycle Count');
+    return {
+      total: counts.masuk + counts.keluar + counts.pindah + counts.defect + counts.inboundRegister + counts.batches + counts.cycleCounts,
+      details: details
+    };
+  }
+
+  var searchMasterEl = byId('search-master');
+  if (searchMasterEl) {
+    searchMasterEl.addEventListener('input', function (e) {
+      appState.masterSearch = targetEl(e).value;
+      renderApp();
+      var s = byId('search-master');
+      if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+    });
+  }
+
+  root.querySelectorAll('[data-del-master-idx]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var idx = Number(btn.getAttribute('data-del-master-idx'));
+      var dNow = curData();
+      var target = (dNow.master || [])[idx];
+      if (!target) return;
+
+      var usage = getMasterItemTransactionUsage(dNow, target);
+      if (usage.total > 0) {
+        showToast('Tidak dapat menghapus: barang sudah memiliki riwayat transaksi', 'err');
+        confirmDialog(
+          'Penghapusan Ditolak',
+          '<p style="margin:0 0 8px">Item <strong>' + esc(target.nama || target.sku || target.barcode) + '</strong> (<span class="mono">' + esc(target.sku || target.barcode) + '</span>) tidak dapat dihapus dari Master Data karena sudah memiliki <strong>' + fmtNum(usage.total) + ' riwayat transaksi</strong>:</p>' +
+          '<p class="muted" style="margin:0">' + esc(usage.details.join(' · ')) + '</p>',
+          null,
+          false
+        );
+        return;
+      }
+
+      confirmDialog(
+        'Konfirmasi Hapus Master Barang',
+        '<p style="margin:0 0 8px">Anda yakin ingin menghapus barang berikut dari Master Data gudang aktif?</p>' +
+        '<div class="inline-alert warn" style="margin:0">' +
+        '<strong>' + esc(target.nama || '-') + '</strong><br/>' +
+        'SKU: <span class="mono">' + esc(target.sku || '-') + '</span> · Barcode: <span class="mono">' + esc(target.barcode || '-') + '</span>' +
+        '</div>',
+        function () {
+          var latest = curData();
+          var curItem = (latest.master || [])[idx];
+          if (!curItem || normSku(curItem.sku) !== normSku(target.sku) || normBarcode(curItem.barcode) !== normBarcode(target.barcode)) {
+            showToast('Daftar Master berubah, silakan pilih ulang item', 'warn');
+            renderApp();
+            return;
+          }
+          var latestUsage = getMasterItemTransactionUsage(latest, curItem);
+          if (latestUsage.total > 0) {
+            showToast('Gagal hapus: barang memiliki riwayat transaksi (' + latestUsage.details.join(', ') + ')', 'err');
+            renderApp();
+            return;
+          }
+          latest.master.splice(idx, 1);
+          writeWarehouseData(appState.W.cur, latest);
+          showToast('Item "' + (curItem.nama || curItem.sku || curItem.barcode) + '" dihapus dari Master Data', 'ok');
+          renderApp();
+        },
+        true
+      );
+    });
+  });
 
   var clearSum = byId('clear-imp-sum');
   if (clearSum) {

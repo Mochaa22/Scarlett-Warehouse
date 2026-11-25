@@ -4,7 +4,7 @@ import { curData, getWhMeta, readWarehouseData, writeWarehouseData } from '../co
 import { appState, renderApp } from '../state/store.ts';
 import { showToast } from '../ui/feedback.ts';
 import { getEffectiveRole, getSelectableWarehouses } from '../ui/rbac.ts';
-import { buildMasterLookups, classifyExpiry, inferProductCategory, normBarcode, normLoc, normSku, parseDate, parseExpDate, parseQty, resolveProductCategory, todayISO, uid } from '../utils/format.ts';
+import { buildMasterLookups, classifyExpiry, getPeriodFileSlug, inferProductCategory, normBarcode, normLoc, normSku, parseDate, parseExpDate, parseQty, resolveProductCategory, todayISO, uid } from '../utils/format.ts';
 
 // === IMPOR XLSX (SHEETJS) & MANUAL CSV/TSV ===
 export function findSheet(wb, targetName) {
@@ -797,3 +797,284 @@ export function exportAllDatabaseExcel() {
   XLSX.writeFile(wb, filename);
   showToast('Database Excel (.xlsx) diunduh: ' + whList.length + ' gudang, 12 sheet rapi', 'ok');
 }
+
+function buildMasukExcelRows(whName: string, rows: any[], matchFn?: (r: any) => any) {
+  return (rows || []).map(function (r) {
+    var isDone = isMasukAncanthoDone(r);
+    var im = matchFn ? matchFn(r) : getMasukInboundMatch(r);
+    return [
+      whName,
+      r.tgl || '',
+      r.by || '',
+      r.barcode || '',
+      r.sku || '',
+      r.nama || '',
+      r.lok || '',
+      r.exp || '',
+      r.batch || '',
+      Number(r.qty || 0),
+      im.hasInbound ? Number(im.inboundQty || 0) : '',
+      im.hasInbound ? im.label : 'Belum Ada Inbound',
+      isDone ? 'Done' : 'Menunggu Admin',
+      r.ancanthoBy || '',
+      r.ancanthoAt || '',
+      r.ket || '',
+      r.ancanthoKet || ''
+    ];
+  });
+}
+
+function buildKeluarExcelRows(whName: string, d: any, an: any, rows: any[]) {
+  return (rows || []).map(function (r) {
+    var isDone = isMasukAncanthoDone(r);
+    var st = validateKeluarItem(r, d, an.stockMap, false);
+    return [
+      whName,
+      r.tgl || '',
+      r.by || '',
+      r.barcode || '',
+      r.sku || '',
+      r.nama || '',
+      r.lok || '',
+      r.exp || '',
+      Number(r.qty || 0),
+      st.text || '',
+      isDone ? 'Done Transfer' : 'Menunggu Admin',
+      r.ancanthoBy || '',
+      r.ancanthoAt || '',
+      r.ket || '',
+      r.ancanthoKet || ''
+    ];
+  });
+}
+
+const MASUK_HEADERS = [
+  'Nama Gudang', 'Tanggal', 'PIC Stockkeeper', 'Barcode', 'SKU', 'Nama Barang', 'Lokasi',
+  'Expiry Date', 'Batch', 'Qty Stockkeeper', 'Stock Inbound', 'Status Match',
+  'Status Ancantho', 'Admin Ancantho', 'Waktu Done', 'Keterangan Stockkeeper', 'Keterangan Admin'
+];
+
+const KELUAR_HEADERS = [
+  'Nama Gudang', 'Tanggal', 'PIC Stockkeeper', 'Barcode', 'SKU', 'Nama Barang', 'Lokasi',
+  'Expiry Date', 'Qty Keluar', 'Status Validasi', 'Status Ancantho',
+  'Admin Ancantho', 'Waktu Done', 'Keterangan', 'Keterangan Admin'
+];
+
+export function exportFilteredInboundExcel(whName: string, rows: any[], opts?: { label?: string; slug?: string }) {
+  if (typeof XLSX === 'undefined') {
+    showToast('Pustaka Excel (SheetJS) belum termuat. Periksa koneksi lalu muat ulang halaman.', 'err');
+    return;
+  }
+  if (!rows || rows.length === 0) {
+    showToast('Tidak ada data Barang Masuk (Inbound) yang sesuai filter untuk diunduh', 'warn');
+    return;
+  }
+  var wb = XLSX.utils.book_new();
+  var usedNames = Object.create(null);
+  appendNeatSheet(wb, usedNames, 'Barang Masuk (Inbound)', MASUK_HEADERS, buildMasukExcelRows(whName, rows));
+  var slug = (opts && opts.slug) || todayISO();
+  var filename = 'Laporan-Inbound-' + slug + '.xlsx';
+  XLSX.writeFile(wb, filename);
+  showToast('Excel Inbound diunduh (' + rows.length + ' baris' + (opts && opts.label ? ' · ' + opts.label : '') + ')', 'ok');
+}
+
+export function exportFilteredOutboundExcel(whName: string, d: any, an: any, rows: any[], opts?: { label?: string; slug?: string }) {
+  if (typeof XLSX === 'undefined') {
+    showToast('Pustaka Excel (SheetJS) belum termuat. Periksa koneksi lalu muat ulang halaman.', 'err');
+    return;
+  }
+  if (!rows || rows.length === 0) {
+    showToast('Tidak ada data Barang Keluar (Outbound) yang sesuai filter untuk diunduh', 'warn');
+    return;
+  }
+  var wb = XLSX.utils.book_new();
+  var usedNames = Object.create(null);
+  appendNeatSheet(wb, usedNames, 'Barang Keluar (Outbound)', KELUAR_HEADERS, buildKeluarExcelRows(whName, d, an, rows));
+  var slug = (opts && opts.slug) || todayISO();
+  var filename = 'Laporan-Outbound-' + slug + '.xlsx';
+  XLSX.writeFile(wb, filename);
+  showToast('Excel Outbound diunduh (' + rows.length + ' baris' + (opts && opts.label ? ' · ' + opts.label : '') + ')', 'ok');
+}
+
+export function exportFilteredSuratJalanExcel(
+  whName: string,
+  queueRows: any[],
+  registerRows: any[],
+  adminMatchFn: (r: any) => any,
+  opts?: { label?: string; slug?: string }
+) {
+  if (typeof XLSX === 'undefined') {
+    showToast('Pustaka Excel (SheetJS) belum termuat. Periksa koneksi lalu muat ulang halaman.', 'err');
+    return;
+  }
+  if ((!queueRows || queueRows.length === 0) && (!registerRows || registerRows.length === 0)) {
+    showToast('Tidak ada data Surat Jalan yang sesuai filter untuk diunduh', 'warn');
+    return;
+  }
+  var wb = XLSX.utils.book_new();
+  var usedNames = Object.create(null);
+
+  if (queueRows && queueRows.length > 0) {
+    var qData = queueRows.map(function (r) {
+      var im = adminMatchFn(r);
+      return [
+        whName,
+        r.tgl || '',
+        r.supplier || '',
+        r.driver || '',
+        r.noPlat || '',
+        im.noDoc || r.noDoc || '',
+        r.barcode || '',
+        r.sku || '',
+        r.nama || '',
+        r.lok || '',
+        r.exp || '',
+        Number(r.qty || 0),
+        im.hasInbound ? Number(im.inboundQty || 0) : '',
+        im.label || '',
+        isMasukAncanthoDone(r) ? 'Done' : 'Menunggu Admin',
+        r.by || '',
+        r.ancanthoBy || '',
+        r.ancanthoAt || '',
+        r.ancanthoKet || ''
+      ];
+    });
+    appendNeatSheet(wb, usedNames, 'Antrean Surat Jalan', [
+      'Nama Gudang', 'Tanggal', 'Supplier', 'Driver', 'No Plat', 'No Doc',
+      'Barcode', 'SKU', 'Nama Barang', 'Lokasi', 'Expired Date',
+      'Qty Stockkeeper', 'Qty Surat Jalan', 'Status Match', 'Status Ancantho',
+      'PIC Stockkeeper', 'Admin Penginput', 'Waktu Done', 'Keterangan Admin'
+    ], qData);
+  }
+
+  if (registerRows && registerRows.length > 0) {
+    var rData = registerRows.map(function (ib) {
+      return [
+        whName,
+        ib.tgl || '',
+        ib.supplier || '',
+        ib.driver || '',
+        ib.noPlat || '',
+        ib.noDoc || '',
+        ib.barcode || '',
+        ib.sku || '',
+        ib.nama || '',
+        ib.exp || '',
+        Number(ib.qty || 0)
+      ];
+    });
+    appendNeatSheet(wb, usedNames, 'Register Surat Jalan', [
+      'Nama Gudang', 'Tanggal', 'Supplier', 'Driver', 'No Plat', 'No Doc',
+      'Barcode', 'SKU', 'Nama Barang', 'Expired Date', 'Total Qty'
+    ], rData);
+  }
+
+  var slug = (opts && opts.slug) || todayISO();
+  var filename = 'Laporan-Surat-Jalan-' + slug + '.xlsx';
+  XLSX.writeFile(wb, filename);
+  var totalCount = (queueRows ? queueRows.length : 0) + (registerRows ? registerRows.length : 0);
+  showToast('Excel Surat Jalan diunduh (' + totalCount + ' baris' + (opts && opts.label ? ' · ' + opts.label : '') + ')', 'ok');
+}
+
+export function exportUnifiedReportExcel(opts: {
+  whName: string;
+  d: any;
+  an: any;
+  category: string;
+  periodLabel: string;
+  period: string;
+  from?: string;
+  to?: string;
+  inboundRows: any[];
+  outboundRows: any[];
+  suratJalanQueueRows: any[];
+  suratJalanRegisterRows: any[];
+  adminMatchFn: (r: any) => any;
+}) {
+  if (typeof XLSX === 'undefined') {
+    showToast('Pustaka Excel (SheetJS) belum termuat. Periksa koneksi lalu muat ulang halaman.', 'err');
+    return;
+  }
+  var cat = opts.category || 'all';
+  var slug = getPeriodFileSlug(opts.period || 'all', opts.from, opts.to);
+
+  if (cat === 'inbound') {
+    exportFilteredInboundExcel(opts.whName, opts.inboundRows, { label: opts.periodLabel, slug: slug });
+    return;
+  }
+  if (cat === 'outbound') {
+    exportFilteredOutboundExcel(opts.whName, opts.d, opts.an, opts.outboundRows, { label: opts.periodLabel, slug: slug });
+    return;
+  }
+  if (cat === 'surat_jalan') {
+    exportFilteredSuratJalanExcel(opts.whName, opts.suratJalanQueueRows, opts.suratJalanRegisterRows, opts.adminMatchFn, { label: opts.periodLabel, slug: slug });
+    return;
+  }
+
+  // 'all' => gabungkan riwayat Inbound & Outbound sesuai filter yang tampil
+  var totalRows = opts.inboundRows.length + opts.outboundRows.length;
+  if (totalRows === 0) {
+    showToast('Tidak ada data Inbound / Outbound yang sesuai filter untuk diunduh', 'warn');
+    return;
+  }
+
+  var wb = XLSX.utils.book_new();
+  var usedNames = Object.create(null);
+
+  var combinedRows: any[] = [];
+  opts.inboundRows.forEach(function (r) {
+    combinedRows.push([
+      opts.whName,
+      r.tgl || '',
+      'INBOUND (Barang Masuk)',
+      r.barcode || '',
+      r.sku || '',
+      r.nama || '',
+      r.lok || '',
+      r.exp || '',
+      Number(r.qty || 0),
+      isMasukAncanthoDone(r) ? 'Done' : 'Menunggu Admin',
+      r.by || '',
+      r.ancanthoBy || '',
+      r.ket || r.ancanthoKet || ''
+    ]);
+  });
+  opts.outboundRows.forEach(function (r) {
+    combinedRows.push([
+      opts.whName,
+      r.tgl || '',
+      'OUTBOUND (Barang Keluar)',
+      r.barcode || '',
+      r.sku || '',
+      r.nama || '',
+      r.lok || '',
+      r.exp || '',
+      Number(r.qty || 0),
+      isMasukAncanthoDone(r) ? 'Done Transfer' : 'Menunggu Admin',
+      r.by || '',
+      r.ancanthoBy || '',
+      r.ket || r.ancanthoKet || ''
+    ]);
+  });
+  combinedRows.sort(function (a, b) {
+    return String(b[1] || '').localeCompare(String(a[1] || ''));
+  });
+
+  appendNeatSheet(wb, usedNames, 'Inbound & Outbound', [
+    'Nama Gudang', 'Tanggal', 'Kategori', 'Barcode', 'SKU', 'Nama Barang',
+    'Lokasi', 'Expiry Date', 'Jumlah (PCS)', 'Status Ancantho',
+    'PIC Stockkeeper', 'Admin Penginput', 'Keterangan'
+  ], combinedRows);
+
+  if (opts.inboundRows.length > 0) {
+    appendNeatSheet(wb, usedNames, 'Barang Masuk (Inbound)', MASUK_HEADERS, buildMasukExcelRows(opts.whName, opts.inboundRows, opts.adminMatchFn));
+  }
+  if (opts.outboundRows.length > 0) {
+    appendNeatSheet(wb, usedNames, 'Barang Keluar (Outbound)', KELUAR_HEADERS, buildKeluarExcelRows(opts.whName, opts.d, opts.an, opts.outboundRows));
+  }
+
+  var filename = 'Laporan-Inbound-Outbound-' + slug + '.xlsx';
+  XLSX.writeFile(wb, filename);
+  showToast('Excel Laporan diunduh (' + combinedRows.length + ' baris · ' + opts.periodLabel + ')', 'ok');
+}
+

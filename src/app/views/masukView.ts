@@ -1,14 +1,14 @@
 import { getMasukInboundMatch, isMasukAncanthoDone } from '../core/cycleCountEngine.ts';
 import { computeWarehouseAnalysis, findMasterByBarcode, findMasterBySku } from '../core/stockEngine.ts';
-import { curData, saveRegistry, scheduleSharedSyncPush, whPrefix, writeWarehouseData } from '../core/warehouseRegistry.ts';
+import { curData, getWhMeta, saveRegistry, scheduleSharedSyncPush, whPrefix, writeWarehouseData } from '../core/warehouseRegistry.ts';
 import { openCameraScanner, playBeep } from '../services/scannerService.ts';
 import { buildInboundWhatsappSlip, openWhatsappSlipModal, removeTxSafely } from '../services/transactionService.ts';
-import { syncMasukBatchQty } from '../services/xlsxService.ts';
+import { exportFilteredInboundExcel, syncMasukBatchQty } from '../services/xlsxService.ts';
 import { SOUND_KEY, appState, renderApp, safeGet, safeSet } from '../state/store.ts';
 import { openBulkTxModal } from '../ui/bulkTxModal.ts';
 import { confirmDialog, iconSvg, openCopyTSV, pageHeaderHtml, showToast } from '../ui/feedback.ts';
 import { getEffectiveRole } from '../ui/rbac.ts';
-import { classifyExpiry, esc, fmtNum, normBarcode, normLoc, normSku, parseExpDate, parseQty, todayISO, uid } from '../utils/format.ts';
+import { classifyExpiry, esc, fmtNum, getPeriodFileSlug, getPeriodLabel, matchesDatePeriod, normBarcode, normLoc, normSku, parseExpDate, parseQty, todayISO, uid } from '../utils/format.ts';
 import { byId, targetEl } from '../utils/dom.ts';
 
 // === HALAMAN 2: BARANG MASUK (INPUT STOCKKEEPER & SCAN BERUNTUN) ===
@@ -78,15 +78,38 @@ export function renderMasuk(root, d) {
     '</div>';
 
   var rowsSk = allMasuk.filter(function (r) {
+    if (!matchesDatePeriod(r.tgl, appState.masukPeriod, appState.masukFrom, appState.masukTo)) return false;
+    var done = isMasukAncanthoDone(r);
+    if (appState.masukStatus === 'pending' && done) return false;
+    if (appState.masukStatus === 'done' && !done) return false;
     if (!q) return true;
     return [r.tgl, r.ket, r.by, r.barcode, r.sku, r.nama, r.lok, r.exp, r.ancanthoBy, r.ancanthoKet].join(' ').toUpperCase().indexOf(q) >= 0;
   });
   var shownSk = rowsSk.slice(0, 100);
+  var masukPeriodLabel = getPeriodLabel(appState.masukPeriod, appState.masukFrom, appState.masukTo);
 
-  html += '<div class="card"><div class="card-header"><h2 class="card-title">Riwayat Input Stockkeeper</h2><span class="muted" style="font-size:12px">Klik Edit jika ada salah input (' + shownSk.length + '/' + rowsSk.length + ' baris)</span></div>' +
+  html += '<div class="card"><div class="card-header"><h2 class="card-title">Riwayat Input Stockkeeper</h2><span class="muted" style="font-size:12px">Klik Edit jika ada salah input (' + shownSk.length + '/' + rowsSk.length + ' baris · ' + esc(masukPeriodLabel) + ')</span></div>' +
     '<div class="toolbar">' +
     '<div class="search-wrap"><input id="search-masuk" type="search" class="input" placeholder="Cari stockkeeper, barcode, produk, lokasi…" value="' + esc(appState.searchState.masuk) + '" /><span class="search-kbd">/</span></div>' +
-    '<button type="button" class="btn" id="copy-masuk-btn">Salin ke Sheets</button>' +
+    '<select id="masuk-period-filt" class="input" style="max-width:170px" aria-label="Filter Periode Barang Masuk">' +
+    '<option value="all"' + (appState.masukPeriod === 'all' ? ' selected' : '') + '>Semua Waktu</option>' +
+    '<option value="month"' + (appState.masukPeriod === 'month' ? ' selected' : '') + '>Bulan Ini</option>' +
+    '<option value="today"' + (appState.masukPeriod === 'today' ? ' selected' : '') + '>Hari Ini</option>' +
+    '<option value="week"' + (appState.masukPeriod === 'week' ? ' selected' : '') + '>7 Hari Terakhir</option>' +
+    '<option value="prev_month"' + (appState.masukPeriod === 'prev_month' ? ' selected' : '') + '>Bulan Lalu</option>' +
+    '<option value="custom"' + (appState.masukPeriod === 'custom' ? ' selected' : '') + '>Rentang Tanggal</option>' +
+    '</select>' +
+    (appState.masukPeriod === 'custom'
+      ? '<input id="masuk-from" type="date" class="input" style="max-width:155px" value="' + esc(appState.masukFrom || '') + '" aria-label="Dari tanggal" />' +
+        '<input id="masuk-to" type="date" class="input" style="max-width:155px" value="' + esc(appState.masukTo || '') + '" aria-label="Sampai tanggal" />'
+      : '') +
+    '<select id="masuk-status-filt" class="input" style="max-width:160px" aria-label="Filter Status Ancantho">' +
+    '<option value="all"' + (appState.masukStatus === 'all' ? ' selected' : '') + '>Semua Status</option>' +
+    '<option value="pending"' + (appState.masukStatus === 'pending' ? ' selected' : '') + '>Menunggu Admin</option>' +
+    '<option value="done"' + (appState.masukStatus === 'done' ? ' selected' : '') + '>Sudah Done</option>' +
+    '</select>' +
+    '<button type="button" class="btn btn-primary btn-sm" id="masuk-export-xlsx-btn">' + iconSvg('download') + '<span>Download Excel (.xlsx)</span></button>' +
+    '<button type="button" class="btn btn-sm" id="copy-masuk-btn">Salin ke Sheets</button>' +
     '</div>' +
     '<div class="table-wrap"><table><thead><tr><th>Tanggal</th><th>Stockkeeper</th><th>Barcode / Produk</th><th>Lokasi</th><th>Expiry Date</th><th class="right">Qty Stockkeeper</th><th class="right">Stock Inbound</th><th>Status Match &amp; Ancantho</th><th>Keterangan</th><th class="right">Aksi</th></tr></thead><tbody>';
 
@@ -363,17 +386,56 @@ export function renderMasuk(root, d) {
     });
   }
 
+  var masukPeriodEl = byId('masuk-period-filt') as HTMLSelectElement;
+  if (masukPeriodEl) {
+    masukPeriodEl.addEventListener('change', function () {
+      appState.masukPeriod = masukPeriodEl.value || 'all';
+      renderApp();
+    });
+  }
+  var masukStatusEl = byId('masuk-status-filt') as HTMLSelectElement;
+  if (masukStatusEl) {
+    masukStatusEl.addEventListener('change', function () {
+      appState.masukStatus = masukStatusEl.value || 'all';
+      renderApp();
+    });
+  }
+  var masukFromEl = byId('masuk-from') as HTMLInputElement;
+  if (masukFromEl) {
+    masukFromEl.addEventListener('change', function () {
+      appState.masukFrom = masukFromEl.value || '';
+      renderApp();
+    });
+  }
+  var masukToEl = byId('masuk-to') as HTMLInputElement;
+  if (masukToEl) {
+    masukToEl.addEventListener('change', function () {
+      appState.masukTo = masukToEl.value || '';
+      renderApp();
+    });
+  }
+
+  var masukExportBtn = byId('masuk-export-xlsx-btn');
+  if (masukExportBtn) {
+    masukExportBtn.addEventListener('click', function () {
+      exportFilteredInboundExcel(
+        getWhMeta(appState.W.cur).nama,
+        rowsSk,
+        {
+          label: masukPeriodLabel,
+          slug: getPeriodFileSlug(appState.masukPeriod, appState.masukFrom, appState.masukTo)
+        }
+      );
+    });
+  }
+
   var copyBtn = byId('copy-masuk-btn');
   if (copyBtn) {
     copyBtn.addEventListener('click', function () {
-      var exportRows = allMasuk.filter(function (r) {
-        if (!q) return true;
-        return [r.tgl, r.ket, r.by, r.barcode, r.sku, r.nama, r.lok, r.exp, r.ancanthoBy, r.ancanthoKet].join(' ').toUpperCase().indexOf(q) >= 0;
-      });
       openCopyTSV(
         'Salin Barang Masuk',
         ['PIC Stockkeeper', 'Tanggal', 'Barcode', 'SKU', 'Nama Barang', 'Lokasi', 'Expiry Date', 'Qty', 'Keterangan'],
-        exportRows.map(function (r) {
+        rowsSk.map(function (r) {
           return [r.by, r.tgl, r.barcode, r.sku, r.nama, r.lok, r.exp, r.qty, r.ket || ''];
         })
       );

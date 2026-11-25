@@ -276,3 +276,67 @@ export function resolveProductCategory(sku: any, barcode: any, nama: any, lookup
   }
   return inferProductCategory(nama || (m && m.nama), m && m.kategori);
 }
+
+export function matchesDatePeriod(dateVal: any, period: string, fromDate?: string, toDate?: string): boolean {
+  if (!period || period === 'all') return true;
+  var tgl = parseDate(dateVal);
+  if (!tgl) return false;
+  var today = todayISO();
+  if (period === 'today') return tgl === today;
+  if (period === 'week') {
+    var start7 = addDaysISO(today, -6);
+    return tgl >= start7 && tgl <= today;
+  }
+  if (period === 'month') {
+    return tgl.slice(0, 7) === today.slice(0, 7);
+  }
+  if (period === 'prev_month') {
+    var parts = today.split('-').map(Number);
+    var pm = new Date(parts[0], parts[1] - 2, 1);
+    var prevYm = pm.getFullYear() + '-' + String(pm.getMonth() + 1).padStart(2, '0');
+    return tgl.slice(0, 7) === prevYm;
+  }
+  if (period === 'custom') {
+    var f = parseDate(fromDate);
+    var t = parseDate(toDate);
+    if (f && tgl < f) return false;
+    if (t && tgl > t) return false;
+    return true;
+  }
+  return true;
+}
+
+export function getPeriodLabel(period: string, fromDate?: string, toDate?: string): string {
+  if (period === 'today') return 'Hari Ini (' + todayISO() + ')';
+  if (period === 'week') return '7 Hari Terakhir';
+  if (period === 'month') return 'Bulan Ini (' + todayISO().slice(0, 7) + ')';
+  if (period === 'prev_month') {
+    var parts = todayISO().split('-').map(Number);
+    var pm = new Date(parts[0], parts[1] - 2, 1);
+    return 'Bulan Lalu (' + pm.getFullYear() + '-' + String(pm.getMonth() + 1).padStart(2, '0') + ')';
+  }
+  if (period === 'custom') {
+    var f = parseDate(fromDate) || '...';
+    var t = parseDate(toDate) || '...';
+    return 'Periode ' + f + ' s.d. ' + t;
+  }
+  return 'Semua Tanggal';
+}
+
+export function getPeriodFileSlug(period: string, fromDate?: string, toDate?: string): string {
+  if (period === 'today') return todayISO();
+  if (period === 'week') return '7hari-' + todayISO();
+  if (period === 'month') return todayISO().slice(0, 7);
+  if (period === 'prev_month') {
+    var parts = todayISO().split('-').map(Number);
+    var pm = new Date(parts[0], parts[1] - 2, 1);
+    return pm.getFullYear() + '-' + String(pm.getMonth() + 1).padStart(2, '0');
+  }
+  if (period === 'custom') {
+    var f = parseDate(fromDate) || 'awal';
+    var t = parseDate(toDate) || todayISO();
+    return f + '_sd_' + t;
+  }
+  return todayISO();
+}
+

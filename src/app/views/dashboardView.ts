@@ -1,15 +1,16 @@
 import { getMasukInboundMatch, isMasukAncanthoDone } from '../core/cycleCountEngine.ts';
 import { buildSampleData } from '../core/seedData.ts';
 import { computeWarehouseAnalysis, findMasterByBarcode, findMasterBySku } from '../core/stockEngine.ts';
-import { curData, getWhMeta, writeWarehouseData } from '../core/warehouseRegistry.ts';
+import { curData, getWhMeta, whPrefix, writeWarehouseData } from '../core/warehouseRegistry.ts';
 import { openCameraScanner, playBeep } from '../services/scannerService.ts';
 import { buildDailyWhatsappReport, openWhatsappSlipModal } from '../services/transactionService.ts';
-import { exportAllDatabaseExcel } from '../services/xlsxService.ts';
-import { appState, renderApp } from '../state/store.ts';
+import { exportAllDatabaseExcel, exportUnifiedReportExcel } from '../services/xlsxService.ts';
+import { appState, renderApp, safeGet } from '../state/store.ts';
 import { iconSvg, openSkuDetailModal, pageHeaderHtml, showToast } from '../ui/feedback.ts';
 import { getEffectiveRole } from '../ui/rbac.ts';
-import { esc, fmtNum, normBarcode, normSku, todayISO } from '../utils/format.ts';
-import { byId } from '../utils/dom.ts';
+import { esc, fmtNum, getPeriodLabel, matchesDatePeriod, normBarcode, normSku, todayISO } from '../utils/format.ts';
+import { byId, targetEl } from '../utils/dom.ts';
+import { getAdminInboundMatches } from './inboundView.ts';
 
 // === HALAMAN 1: DASHBOARD ===
 export function renderDashboard(root, d, an) {
@@ -18,7 +19,8 @@ export function renderDashboard(root, d, an) {
     'Dashboard — ' + getWhMeta(appState.W.cur).nama,
     'Fokus operasional harian: Barang Masuk, Antrean Inbound Matching, Barang Keluar, dan Perpindahan Barang.',
     '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-    '<button type="button" class="btn btn-sm" id="dash-export-xlsx-btn">' + iconSvg('download') + '<span>Download Excel</span></button>' +
+    (hasData ? '<button type="button" class="btn btn-primary btn-sm" id="dash-export-xlsx-btn">' + iconSvg('download') + '<span>Download Excel Laporan</span></button>' : '') +
+    (hasData ? '<button type="button" class="btn btn-sm" id="dash-export-all-btn">' + iconSvg('download') + '<span>Database Lengkap</span></button>' : '') +
     (hasData ? '<button type="button" class="btn btn-wa btn-sm" id="dash-wa-btn">' + iconSvg('whatsapp') + '<span>Laporan Harian WA</span></button>' : '') +
     '</div>'
   );
@@ -173,30 +175,201 @@ export function renderDashboard(root, d, an) {
   }
   html += '</div></div>';
 
-  // Aktivitas 4 Alur Utama Terakhir
-  var activities = [];
-  (d.masuk || []).forEach(function (r) {
-    activities.push({ jenis: 'Masuk', cls: 'badge-ok', tgl: r.tgl, desk: r.lok + ' · ' + (r.nama || r.sku), qty: '+' + fmtNum(r.qty), by: r.by || '-' });
-  });
-  (d.keluar || []).forEach(function (r) {
-    activities.push({ jenis: 'Keluar', cls: 'badge-warn', tgl: r.tgl, desk: r.lok + ' · ' + (r.nama || r.sku), qty: '-' + fmtNum(r.qty), by: r.by || '-' });
-  });
-  (d.pindah || []).forEach(function (r) {
-    activities.push({ jenis: 'Pindah', cls: 'badge-info', tgl: r.tgl, desk: r.dari + ' → ' + r.ke + ' · ' + (r.nama || r.sku), qty: fmtNum(r.qty), by: r.by || '-' });
-  });
-  activities.sort(function (a, b) { return String(b.tgl || '').localeCompare(String(a.tgl || '')); });
+  // Laporan & Filter Dinamis (Inbound, Outbound, Surat Jalan) -> Terhubung ke Export Excel
+  var rf = appState.reportFilter || (appState.reportFilter = { category: 'all', period: 'all', from: '', to: '', status: 'all', q: '' });
+  var whName = getWhMeta(appState.W.cur).nama;
+  var registerAll = safeGet(whPrefix(appState.W.cur) + 'inboundRegister', []);
+  var allMasukRev = (d.masuk || []).slice().reverse();
+  var allKeluarRev = (d.keluar || []).slice().reverse();
+  var adminMatchFn = getAdminInboundMatches(allMasukRev, registerAll);
 
-  html += '<div class="card"><div class="card-header"><h2 class="card-title">Aktivitas Masuk, Keluar &amp; Pindah Terakhir</h2><span class="muted" style="font-size:12px">15 transaksi terbaru</span></div>';
-  if (activities.length === 0) {
-    html += '<p class="muted" style="margin:0">Belum ada transaksi tercatat.</p>';
-  } else {
-    html += '<div class="table-wrap"><table><thead><tr><th>Tanggal</th><th>Jenis</th><th>Detail</th><th class="right">Qty</th><th>Petugas</th></tr></thead><tbody>';
-    activities.slice(0, 15).forEach(function (a) {
-      html += '<tr><td class="num">' + esc(a.tgl || '-') + '</td><td><span class="badge ' + a.cls + '">' + a.jenis + '</span></td><td>' + esc(a.desk) + '</td><td class="right num">' + esc(a.qty) + '</td><td>' + esc(a.by) + '</td></tr>';
+  function computeReportFiltered() {
+    var qRep = String(rf.q || '').trim().toUpperCase();
+    var matchSearch = function (fields: any[]) {
+      if (!qRep) return true;
+      return fields.join(' ').toUpperCase().indexOf(qRep) >= 0;
+    };
+    var matchStatus = function (row: any) {
+      var done = isMasukAncanthoDone(row);
+      if (rf.status === 'pending') return !done;
+      if (rf.status === 'done') return done;
+      return true;
+    };
+
+    var inboundRows = allMasukRev.filter(function (r) {
+      if (!matchesDatePeriod(r.tgl, rf.period, rf.from, rf.to)) return false;
+      if (!matchStatus(r)) return false;
+      return matchSearch([r.tgl, r.barcode, r.sku, r.nama, r.lok, r.by, r.ancanthoBy, r.ket, r.ancanthoKet]);
     });
-    html += '</tbody></table></div>';
+
+    var outboundRows = allKeluarRev.filter(function (r) {
+      if (!matchesDatePeriod(r.tgl, rf.period, rf.from, rf.to)) return false;
+      if (!matchStatus(r)) return false;
+      return matchSearch([r.tgl, r.barcode, r.sku, r.nama, r.lok, r.by, r.ancanthoBy, r.ket, r.ancanthoKet]);
+    });
+
+    var suratJalanQueueRows = allMasukRev.filter(function (r) {
+      if (!matchesDatePeriod(r.tgl, rf.period, rf.from, rf.to)) return false;
+      if (!matchStatus(r)) return false;
+      var im = adminMatchFn(r);
+      return matchSearch([r.tgl, r.supplier, r.driver, r.noPlat, im.noDoc || r.noDoc, r.barcode, r.sku, r.nama, r.lok, r.by, r.ancanthoBy, r.ancanthoKet]);
+    });
+
+    var suratJalanRegisterRows = (registerAll || []).slice().reverse().filter(function (ib) {
+      if (!matchesDatePeriod(ib.tgl, rf.period, rf.from, rf.to)) return false;
+      return matchSearch([ib.tgl, ib.supplier, ib.driver, ib.noPlat, ib.noDoc, ib.barcode, ib.sku, ib.nama]);
+    });
+
+    var previewRows: any[] = [];
+    if (rf.category === 'all' || rf.category === 'inbound') {
+      inboundRows.forEach(function (r) {
+        var done = isMasukAncanthoDone(r);
+        previewRows.push({
+          tgl: r.tgl || '-',
+          kat: 'Inbound',
+          katCls: 'badge-ok',
+          code: r.barcode || r.sku || '-',
+          sku: r.sku || '',
+          nama: r.nama || r.sku || '-',
+          lok: r.lok || '-',
+          qty: '+' + fmtNum(r.qty),
+          rawQty: Number(r.qty || 0),
+          status: done ? 'Done' : 'Menunggu Admin',
+          stCls: done ? 'badge-ok' : 'badge-warn',
+          pic: r.by || '-',
+          ket: r.ket || r.ancanthoKet || ''
+        });
+      });
+    }
+    if (rf.category === 'all' || rf.category === 'outbound') {
+      outboundRows.forEach(function (r) {
+        var done = isMasukAncanthoDone(r);
+        previewRows.push({
+          tgl: r.tgl || '-',
+          kat: 'Outbound',
+          katCls: 'badge-warn',
+          code: r.barcode || r.sku || '-',
+          sku: r.sku || '',
+          nama: r.nama || r.sku || '-',
+          lok: r.lok || '-',
+          qty: '-' + fmtNum(r.qty),
+          rawQty: Number(r.qty || 0),
+          status: done ? 'Done Transfer' : 'Menunggu Admin',
+          stCls: done ? 'badge-ok' : 'badge-warn',
+          pic: r.by || '-',
+          ket: r.ket || r.ancanthoKet || ''
+        });
+      });
+    }
+    if (rf.category === 'surat_jalan') {
+      suratJalanQueueRows.forEach(function (r) {
+        var done = isMasukAncanthoDone(r);
+        var im = adminMatchFn(r);
+        previewRows.push({
+          tgl: r.tgl || '-',
+          kat: 'Surat Jalan',
+          katCls: 'badge-info',
+          code: r.barcode || r.sku || '-',
+          sku: r.sku || '',
+          nama: r.nama || r.sku || '-',
+          lok: (im.noDoc ? ('Doc ' + im.noDoc + ' · ') : '') + (r.lok || '-'),
+          qty: fmtNum(r.qty),
+          rawQty: Number(r.qty || 0),
+          status: im.label + (done ? ' · Done' : ''),
+          stCls: done ? 'badge-ok' : im.cls,
+          pic: r.by || '-',
+          ket: r.supplier || r.ancanthoKet || ''
+        });
+      });
+    }
+
+    previewRows.sort(function (a, b) {
+      return String(b.tgl || '').localeCompare(String(a.tgl || ''));
+    });
+
+    return {
+      inboundRows: inboundRows,
+      outboundRows: outboundRows,
+      suratJalanQueueRows: suratJalanQueueRows,
+      suratJalanRegisterRows: suratJalanRegisterRows,
+      previewRows: previewRows,
+      periodLabel: getPeriodLabel(rf.period, rf.from, rf.to)
+    };
   }
-  html += '</div>';
+
+  var repData = computeReportFiltered();
+  var catLabels: Record<string, string> = {
+    all: 'Inbound & Outbound',
+    inbound: 'Inbound (Barang Masuk)',
+    outbound: 'Outbound (Barang Keluar)',
+    surat_jalan: 'Surat Jalan'
+  };
+
+  function buildReportTableBodyHtml(data: any) {
+    var rows = data.previewRows;
+    if (!rows.length) {
+      return '<tr><td colspan="7" class="muted" style="text-align:center;padding:22px">Tidak ada data transaksi yang sesuai filter ini.</td></tr>';
+    }
+    return rows.slice(0, 120).map(function (row) {
+      return '<tr>' +
+        '<td class="num">' + esc(row.tgl) + '</td>' +
+        '<td><span class="badge ' + row.katCls + '">' + esc(row.kat) + '</span></td>' +
+        '<td><div class="mono" style="font-size:12px">' + esc(row.code) + '</div>' + (row.sku && row.sku !== row.code ? '<div class="muted mono" style="font-size:11px">' + esc(row.sku) + '</div>' : '') + '</td>' +
+        '<td><strong>' + esc(row.nama) + '</strong>' + (row.ket ? '<div class="muted" style="font-size:11.5px">' + esc(row.ket) + '</div>' : '') + '</td>' +
+        '<td><span class="masuk-loc-pill">' + esc(row.lok) + '</span></td>' +
+        '<td class="right num"><strong>' + esc(row.qty) + '</strong></td>' +
+        '<td><div><span class="badge ' + row.stCls + '">' + esc(row.status) + '</span></div><div class="muted" style="font-size:11px;margin-top:2px">' + esc(row.pic) + '</div></td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  function buildReportSummaryHtml(data: any) {
+    var totalPcsRep = data.previewRows.reduce(function (s: number, r: any) { return s + Number(r.rawQty || 0); }, 0);
+    var catTxt = catLabels[rf.category] || 'Semua';
+    return 'Menampilkan <strong>' + fmtNum(Math.min(120, data.previewRows.length)) + '</strong> dari <strong>' + fmtNum(data.previewRows.length) + '</strong> baris · ' +
+      'Total <strong>' + fmtNum(totalPcsRep) + ' PCS</strong> · Kategori: <strong>' + esc(catTxt) + '</strong> · Periode: <strong>' + esc(data.periodLabel) + '</strong>';
+  }
+
+  html += '<section class="card" id="dash-report-card">' +
+    '<div class="card-header">' +
+    '<div><h2 class="card-title">Laporan &amp; Filter Dinamis (Inbound, Outbound &amp; Surat Jalan)</h2>' +
+    '<p class="muted" style="margin:2px 0 0;font-size:12.5px">Filter tabel di bawah terhubung langsung dengan tombol Download Excel (.xlsx).</p></div>' +
+    '<button type="button" class="btn btn-primary btn-sm" id="dash-report-export-btn">' + iconSvg('download') + '<span>Download Excel (.xlsx)</span></button>' +
+    '</div>' +
+    '<div class="form-grid" style="margin-bottom:12px">' +
+    '<div class="field span-2"><label>Kategori Data</label><div class="seg-group" role="tablist" aria-label="Kategori Laporan">' +
+    '<button type="button" class="seg-btn' + (rf.category === 'all' ? ' active' : '') + '" data-rep-cat="all">Semua (Inbound &amp; Outbound)</button>' +
+    '<button type="button" class="seg-btn' + (rf.category === 'inbound' ? ' active' : '') + '" data-rep-cat="inbound">Inbound (Masuk)</button>' +
+    '<button type="button" class="seg-btn' + (rf.category === 'outbound' ? ' active' : '') + '" data-rep-cat="outbound">Outbound (Keluar)</button>' +
+    '<button type="button" class="seg-btn' + (rf.category === 'surat_jalan' ? ' active' : '') + '" data-rep-cat="surat_jalan">Surat Jalan</button>' +
+    '</div></div>' +
+    '<div class="field"><label for="rep-period">Periode</label><select id="rep-period" class="input">' +
+    '<option value="all"' + (rf.period === 'all' ? ' selected' : '') + '>Semua Waktu</option>' +
+    '<option value="month"' + (rf.period === 'month' ? ' selected' : '') + '>Bulan Ini</option>' +
+    '<option value="today"' + (rf.period === 'today' ? ' selected' : '') + '>Hari Ini</option>' +
+    '<option value="week"' + (rf.period === 'week' ? ' selected' : '') + '>7 Hari Terakhir</option>' +
+    '<option value="prev_month"' + (rf.period === 'prev_month' ? ' selected' : '') + '>Bulan Lalu</option>' +
+    '<option value="custom"' + (rf.period === 'custom' ? ' selected' : '') + '>Rentang Tanggal</option>' +
+    '</select></div>' +
+    '<div class="field"><label for="rep-status">Status Ancantho</label><select id="rep-status" class="input">' +
+    '<option value="all"' + (rf.status === 'all' ? ' selected' : '') + '>Semua Status</option>' +
+    '<option value="pending"' + (rf.status === 'pending' ? ' selected' : '') + '>Menunggu Admin</option>' +
+    '<option value="done"' + (rf.status === 'done' ? ' selected' : '') + '>Sudah Done</option>' +
+    '</select></div>' +
+    (rf.period === 'custom'
+      ? '<div class="field"><label for="rep-from">Dari Tanggal</label><input id="rep-from" type="date" class="input" value="' + esc(rf.from || '') + '" /></div>' +
+        '<div class="field"><label for="rep-to">Sampai Tanggal</label><input id="rep-to" type="date" class="input" value="' + esc(rf.to || '') + '" /></div>'
+      : '') +
+    '</div>' +
+    '<div class="toolbar">' +
+    '<div class="search-wrap"><input id="rep-search" type="search" class="input" placeholder="Cari produk, barcode, SKU, lokasi, PIC, no doc…" value="' + esc(rf.q || '') + '" /><span class="search-kbd">/</span></div>' +
+    '<button type="button" class="btn btn-sm" id="rep-reset-btn">Reset Filter</button>' +
+    '</div>' +
+    '<div id="rep-summary" class="muted" style="font-size:12.5px;margin:0 0 10px">' + buildReportSummaryHtml(repData) + '</div>' +
+    '<div class="table-wrap"><table><thead><tr><th>Tanggal</th><th>Kategori</th><th>Barcode / SKU</th><th>Nama Barang</th><th>Lokasi / Doc</th><th class="right">Jumlah</th><th>Status &amp; PIC</th></tr></thead><tbody id="rep-table-body">' +
+    buildReportTableBodyHtml(repData) +
+    '</tbody></table></div>' +
+    '</section>';
 
   root.innerHTML = html;
   root.querySelectorAll('[data-jump]').forEach(function (b) {
@@ -222,8 +395,86 @@ export function renderDashboard(root, d, an) {
       buildDailyWhatsappReport(curData(), computeWarehouseAnalysis(curData()))
     );
   }
+
+  function triggerFilteredReportExport() {
+    var latest = computeReportFiltered();
+    exportUnifiedReportExcel({
+      whName: whName,
+      d: d,
+      an: an,
+      category: rf.category,
+      periodLabel: latest.periodLabel,
+      period: rf.period,
+      from: rf.from,
+      to: rf.to,
+      inboundRows: latest.inboundRows,
+      outboundRows: latest.outboundRows,
+      suratJalanQueueRows: latest.suratJalanQueueRows,
+      suratJalanRegisterRows: latest.suratJalanRegisterRows,
+      adminMatchFn: adminMatchFn
+    });
+  }
+
   var dashExportBtn = byId('dash-export-xlsx-btn');
-  if (dashExportBtn) dashExportBtn.addEventListener('click', exportAllDatabaseExcel);
+  if (dashExportBtn) dashExportBtn.addEventListener('click', triggerFilteredReportExport);
+  var dashReportExportBtn = byId('dash-report-export-btn');
+  if (dashReportExportBtn) dashReportExportBtn.addEventListener('click', triggerFilteredReportExport);
+  var dashExportAllBtn = byId('dash-export-all-btn');
+  if (dashExportAllBtn) dashExportAllBtn.addEventListener('click', exportAllDatabaseExcel);
+
+  root.querySelectorAll('[data-rep-cat]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      rf.category = btn.getAttribute('data-rep-cat') || 'all';
+      renderApp();
+    });
+  });
+  var repPeriodEl = byId('rep-period') as HTMLSelectElement;
+  if (repPeriodEl) {
+    repPeriodEl.addEventListener('change', function () {
+      rf.period = repPeriodEl.value || 'all';
+      renderApp();
+    });
+  }
+  var repStatusEl = byId('rep-status') as HTMLSelectElement;
+  if (repStatusEl) {
+    repStatusEl.addEventListener('change', function () {
+      rf.status = repStatusEl.value || 'all';
+      renderApp();
+    });
+  }
+  var repFromEl = byId('rep-from') as HTMLInputElement;
+  if (repFromEl) {
+    repFromEl.addEventListener('change', function () {
+      rf.from = repFromEl.value || '';
+      renderApp();
+    });
+  }
+  var repToEl = byId('rep-to') as HTMLInputElement;
+  if (repToEl) {
+    repToEl.addEventListener('change', function () {
+      rf.to = repToEl.value || '';
+      renderApp();
+    });
+  }
+  var repSearchEl = byId('rep-search') as HTMLInputElement;
+  if (repSearchEl) {
+    repSearchEl.addEventListener('input', function (e) {
+      rf.q = targetEl(e).value;
+      var updated = computeReportFiltered();
+      var tbody = byId('rep-table-body');
+      var sumEl = byId('rep-summary');
+      if (tbody) tbody.innerHTML = buildReportTableBodyHtml(updated);
+      if (sumEl) sumEl.innerHTML = buildReportSummaryHtml(updated);
+    });
+  }
+  var repResetBtn = byId('rep-reset-btn');
+  if (repResetBtn) {
+    repResetBtn.addEventListener('click', function () {
+      appState.reportFilter = { category: 'all', period: 'all', from: '', to: '', status: 'all', q: '' };
+      renderApp();
+    });
+  }
+
   var dashWaBtn = byId('dash-wa-btn');
   var dashWaTile = byId('dash-wa-tile');
   if (dashWaBtn) dashWaBtn.addEventListener('click', openDashWhatsapp);

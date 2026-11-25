@@ -1,11 +1,11 @@
-import { computeStockForMode, computeWarehouseAnalysis } from '../core/stockEngine.ts';
+import { computeStockForMode, computeWarehouseAnalysis, findMasterByBarcode, findMasterBySku } from '../core/stockEngine.ts';
 import { readWarehouseData, saveRegistry } from '../core/warehouseRegistry.ts';
 import { openCameraScanner } from '../services/scannerService.ts';
 import { exportAllDatabaseExcel } from '../services/xlsxService.ts';
 import { appState, renderApp } from '../state/store.ts';
 import { iconSvg, openCopyTSV, openSkuDetailModal, pageHeaderHtml } from '../ui/feedback.ts';
 import { getEffectiveRole } from '../ui/rbac.ts';
-import { addDaysISO, esc, fmtNum, normLoc, normSku, todayISO } from '../utils/format.ts';
+import { addDaysISO, esc, fmtNum, normBarcode, normLoc, normSku, todayISO } from '../utils/format.ts';
 import { byId, targetEl } from '../utils/dom.ts';
 
 // === HALAMAN 7: STOK ===
@@ -19,18 +19,50 @@ export function renderStok(root, d, an) {
   var allCats = Array.from(catSet).sort(function (a, b) { return a.localeCompare(b); });
   if (appState.stokCategoryFilter && allCats.indexOf(appState.stokCategoryFilter) < 0) appState.stokCategoryFilter = '';
 
-  var rows = an.rows.slice().sort(function (a, b) {
-    var c = a.lok.localeCompare(b.lok);
-    return c !== 0 ? c : String(a.nama || a.sku).localeCompare(String(b.nama || b.sku));
-  }).filter(function (r) {
-    if (appState.stokFilter === 'ada' && !(r.qty > 0)) return false;
-    if (appState.stokFilter === 'menipis' && !(r.qty > 0 && r.qty <= d.min)) return false;
-    if (appState.stokFilter === 'minus' && !(r.qty < 0)) return false;
-    if (appState.stokCategoryFilter && (r.kategori || 'Lainnya') !== appState.stokCategoryFilter) return false;
-    if (!q) return true;
-    return [r.lok, r.barcode, r.sku, r.nama, r.kategori].join(' ').toUpperCase().indexOf(q) >= 0;
-  });
+  function getFilteredStokRows() {
+    var curQ = appState.searchState.stok.trim().toUpperCase();
+    return an.rows.slice().sort(function (a, b) {
+      var c = a.lok.localeCompare(b.lok);
+      return c !== 0 ? c : String(a.nama || a.sku).localeCompare(String(b.nama || b.sku));
+    }).filter(function (r) {
+      if (appState.stokFilter === 'ada' && !(r.qty > 0)) return false;
+      if (appState.stokFilter === 'menipis' && !(r.qty > 0 && r.qty <= d.min)) return false;
+      if (appState.stokFilter === 'minus' && !(r.qty < 0)) return false;
+      if (appState.stokCategoryFilter && (r.kategori || 'Lainnya') !== appState.stokCategoryFilter) return false;
+      if (!curQ) return true;
+      return String(r.nama || '').toUpperCase().indexOf(curQ) >= 0;
+    });
+  }
 
+  function buildStokTbodyHtml(list: any[]) {
+    if (list.length === 0) {
+      return '<tr><td colspan="' + (canViewStockHistory ? '8' : '7') + '" class="muted" style="text-align:center;padding:24px">Tidak ada barang dengan nama atau filter tersebut.</td></tr>';
+    }
+    return list.map(function (r) {
+      var badge = r.qty < 0
+        ? '<span class="badge badge-err">Minus</span>'
+        : (r.qty === 0
+          ? '<span class="badge badge-neutral">Kosong</span>'
+          : (r.qty <= d.min ? '<span class="badge badge-warn">Menipis</span>' : '<span class="badge badge-ok">Aman</span>'));
+      var eb = an.skuExpMap[normSku(r.sku)];
+      var expCell = '<span class="muted">-</span>';
+      if (eb) {
+        expCell = '<span class="badge ' + eb.expInfo.badgeCls + '">' + esc(eb.exp) + ' · ' + esc(eb.expInfo.label) + '</span>';
+      }
+      return '<tr>' +
+        '<td>' + esc(r.lok) + '</td>' +
+        '<td class="mono">' + esc(r.barcode || '-') + '</td>' +
+        '<td class="mono">' + esc(r.sku) + '</td>' +
+        '<td><div><strong>' + esc(r.nama || '-') + '</strong></div><div class="muted" style="font-size:11.5px">' + esc(r.kategori || 'Lainnya') + '</div></td>' +
+        '<td>' + expCell + '</td>' +
+        '<td class="right num"><strong>' + fmtNum(r.qty) + '</strong></td>' +
+        '<td>' + badge + '</td>' +
+        (canViewStockHistory ? '<td class="right"><button type="button" class="btn btn-sm" data-stok-detail-sku="' + esc(r.sku) + '" data-stok-detail-bc="' + esc(r.barcode || '') + '">Riwayat</button></td>' : '') +
+        '</tr>';
+    }).join('');
+  }
+
+  var rows = getFilteredStokRows();
   var totalShownQty = rows.reduce(function (s, r) { return s + r.qty; }, 0);
 
   var html = pageHeaderHtml(
@@ -39,8 +71,18 @@ export function renderStok(root, d, an) {
   );
 
   html += '<div class="card">' +
+    '<div class="field" style="margin-bottom:12px">' +
+    '<label for="search-stok">Cari Nama Barang (Real-Time)</label>' +
+    '<div class="scan-row">' +
+    '<div class="search-wrap" style="max-width:none;flex:1">' +
+    '<input id="search-stok" type="search" class="input" placeholder="Ketik nama barang untuk cek ketersediaan stok…" value="' + esc(appState.searchState.stok) + '" autocomplete="off" />' +
+    '<span class="search-kbd">/</span>' +
+    '</div>' +
+    (appState.searchState.stok ? '<button type="button" class="btn btn-sm" id="stok-search-clear">Reset</button>' : '<button type="button" class="btn btn-sm" id="stok-search-clear" style="display:none">Reset</button>') +
+    '<button type="button" class="btn" id="stok-cam-btn">Kamera</button>' +
+    '</div>' +
+    '</div>' +
     '<div class="toolbar">' +
-    '<div class="scan-row" style="flex:1;min-width:220px"><div class="search-wrap" style="max-width:none"><input id="search-stok" type="search" class="input" placeholder="Cari lokasi, barcode, SKU, nama, kategori…" value="' + esc(appState.searchState.stok) + '" /><span class="search-kbd">/</span></div><button type="button" class="btn" id="stok-cam-btn">Kamera</button></div>' +
     '<select id="stok-cat-filter" class="input" aria-label="Filter kategori produk" style="width:auto;min-width:170px">' +
     '<option value="">Semua Kategori</option>' +
     allCats.map(function (c) {
@@ -56,45 +98,53 @@ export function renderStok(root, d, an) {
     (canViewStockHistory ? '<button type="button" class="btn" id="copy-stok-btn">Salin ke Sheets</button>' : '') +
     '<button type="button" class="btn" id="stok-export-xlsx-btn">' + iconSvg('download') + '<span>Download Excel (.xlsx)</span></button>' +
     '</div>' +
-    '<div class="muted" style="font-size:12.5px;margin-bottom:10px">Menampilkan <strong class="num">' + fmtNum(rows.length) + '</strong> baris stok · Total Qty: <strong class="num">' + fmtNum(totalShownQty) + ' PCS</strong>' +
-    (appState.stokCategoryFilter ? ' · Kategori: <strong>' + esc(appState.stokCategoryFilter) + '</strong>' : '') + '</div>' +
-    '<div class="table-wrap"><table><thead><tr><th>Lokasi</th><th>Barcode</th><th>SKU</th><th>Nama Produk</th><th>Info Expire</th><th class="right">Stok</th><th>Status</th>' + (canViewStockHistory ? '<th class="right">Detail</th>' : '') + '</tr></thead><tbody>';
-
-  if (rows.length === 0) {
-    html += '<tr><td colspan="' + (canViewStockHistory ? '8' : '7') + '" class="muted" style="text-align:center;padding:24px">Tidak ada baris stok yang sesuai filter.</td></tr>';
-  } else {
-    rows.forEach(function (r) {
-      var badge = r.qty < 0
-        ? '<span class="badge badge-err">Minus</span>'
-        : (r.qty === 0
-          ? '<span class="badge badge-neutral">Kosong</span>'
-          : (r.qty <= d.min ? '<span class="badge badge-warn">Menipis</span>' : '<span class="badge badge-ok">Aman</span>'));
-      var eb = an.skuExpMap[normSku(r.sku)];
-      var expCell = '<span class="muted">-</span>';
-      if (eb) {
-        expCell = '<span class="badge ' + eb.expInfo.badgeCls + '">' + esc(eb.exp) + ' · ' + esc(eb.expInfo.label) + '</span>';
-      }
-      html += '<tr>' +
-        '<td>' + esc(r.lok) + '</td>' +
-        '<td class="mono">' + esc(r.barcode || '-') + '</td>' +
-        '<td class="mono">' + esc(r.sku) + '</td>' +
-        '<td><div>' + esc(r.nama || '-') + '</div><div class="muted" style="font-size:11.5px">' + esc(r.kategori || 'Lainnya') + '</div></td>' +
-        '<td>' + expCell + '</td>' +
-        '<td class="right num"><strong>' + fmtNum(r.qty) + '</strong></td>' +
-        '<td>' + badge + '</td>' +
-        (canViewStockHistory ? '<td class="right"><button type="button" class="btn btn-sm" data-stok-detail-sku="' + esc(r.sku) + '" data-stok-detail-bc="' + esc(r.barcode || '') + '">Riwayat</button></td>' : '') +
-        '</tr>';
-    });
-  }
-  html += '</tbody></table></div></div>';
+    '<div id="stok-summary-bar" class="muted" style="font-size:12.5px;margin-bottom:10px">Menampilkan <strong class="num">' + fmtNum(rows.length) + '</strong> baris stok · Total Qty: <strong class="num">' + fmtNum(totalShownQty) + ' PCS</strong>' +
+    (appState.stokCategoryFilter ? ' · Kategori: <strong>' + esc(appState.stokCategoryFilter) + '</strong>' : '') +
+    (appState.searchState.stok.trim() ? ' · Kata kunci nama: <strong>' + esc(appState.searchState.stok.trim()) + '</strong>' : '') +
+    '</div>' +
+    '<div class="table-wrap"><table><thead><tr><th>Lokasi</th><th>Barcode</th><th>SKU</th><th>Nama Barang</th><th>Info Expire</th><th class="right">Stok</th><th>Status</th>' + (canViewStockHistory ? '<th class="right">Detail</th>' : '') + '</tr></thead><tbody id="stok-table-body">' +
+    buildStokTbodyHtml(rows) +
+    '</tbody></table></div></div>';
 
   root.innerHTML = html;
 
+  function updateStokTableInPlace() {
+    rows = getFilteredStokRows();
+    totalShownQty = rows.reduce(function (s, r) { return s + r.qty; }, 0);
+    var tbody = byId('stok-table-body');
+    if (tbody) tbody.innerHTML = buildStokTbodyHtml(rows);
+    var summary = byId('stok-summary-bar');
+    if (summary) {
+      summary.innerHTML = 'Menampilkan <strong class="num">' + fmtNum(rows.length) + '</strong> baris stok · Total Qty: <strong class="num">' + fmtNum(totalShownQty) + ' PCS</strong>' +
+        (appState.stokCategoryFilter ? ' · Kategori: <strong>' + esc(appState.stokCategoryFilter) + '</strong>' : '') +
+        (appState.searchState.stok.trim() ? ' · Kata kunci nama: <strong>' + esc(appState.searchState.stok.trim()) + '</strong>' : '');
+    }
+    var clearBtn = byId('stok-search-clear');
+    if (clearBtn) clearBtn.style.display = appState.searchState.stok ? '' : 'none';
+  }
+
+  var stokTableBody = byId('stok-table-body');
+  if (stokTableBody) {
+    stokTableBody.addEventListener('click', function (e) {
+      var btn = (e.target as Element | null)?.closest('[data-stok-detail-sku]');
+      if (!btn) return;
+      openSkuDetailModal(btn.getAttribute('data-stok-detail-sku'), btn.getAttribute('data-stok-detail-bc'));
+    });
+  }
+
   byId('search-stok').addEventListener('input', function (e) {
     appState.searchState.stok = targetEl(e).value;
-    renderApp();
+    updateStokTableInPlace();
+  });
+
+  byId('stok-search-clear')?.addEventListener('click', function () {
+    appState.searchState.stok = '';
     var s = byId('search-stok');
-    if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+    if (s) {
+      s.value = '';
+      s.focus();
+    }
+    updateStokTableInPlace();
   });
 
   byId('stok-cat-filter').addEventListener('change', function (e) {
@@ -104,7 +154,11 @@ export function renderStok(root, d, an) {
 
   byId('stok-cam-btn').addEventListener('click', function () {
     openCameraScanner(function (code) {
-      appState.searchState.stok = code;
+      var nb = normBarcode(code);
+      var ns = normSku(code);
+      var m = findMasterByBarcode(d.master, nb) || findMasterBySku(d.master, ns);
+      var rowHit = !m ? an.rows.find(function (r) { return normBarcode(r.barcode) === nb || normSku(r.sku) === ns; }) : null;
+      appState.searchState.stok = (m && m.nama) || (rowHit && rowHit.nama) || code;
       renderApp();
     });
   });
@@ -116,14 +170,9 @@ export function renderStok(root, d, an) {
     });
   });
 
-  root.querySelectorAll('[data-stok-detail-sku]').forEach(function (b) {
-    b.addEventListener('click', function () {
-      openSkuDetailModal(b.getAttribute('data-stok-detail-sku'), b.getAttribute('data-stok-detail-bc'));
-    });
-  });
-
   byId('copy-stok-btn')?.addEventListener('click', function () {
-    openCopyTSV('Salin Tabel Stok', ['Lokasi', 'Barcode', 'SKU', 'Nama Produk', 'Kategori', 'Tgl Expire', 'Status Expire', 'Qty'], rows.map(function (r) {
+    var latestRows = getFilteredStokRows();
+    openCopyTSV('Salin Tabel Stok', ['Lokasi', 'Barcode', 'SKU', 'Nama Barang', 'Kategori', 'Tgl Expire', 'Status Expire', 'Qty'], latestRows.map(function (r) {
       var eb = an.skuExpMap[normSku(r.sku)];
       return [r.lok, r.barcode, r.sku, r.nama, r.kategori || 'Lainnya', eb ? eb.exp : '', eb ? eb.expInfo.label : '', r.qty];
     }));

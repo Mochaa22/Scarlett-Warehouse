@@ -2,6 +2,7 @@ import type {
   AppRole,
   AuthStatusCache,
   PinStatusCache,
+  ReportFilterState,
   SearchFilterState,
   SharedSyncState,
   SyncMeta,
@@ -238,6 +239,19 @@ export interface AppStateContainer {
   expFilter: string;
   otherMenusOpen: boolean;
   inboundFilter: string;
+  inboundPeriod: string;
+  inboundFrom: string;
+  inboundTo: string;
+  inboundSearch: string;
+  masukPeriod: string;
+  masukFrom: string;
+  masukTo: string;
+  masukStatus: string;
+  keluarPeriod: string;
+  keluarFrom: string;
+  keluarTo: string;
+  reportFilter: ReportFilterState;
+  masterSearch: string;
   rapidScanKeluar: boolean;
   lastRapidKeluarId: string;
   settingsTab: string;
@@ -320,6 +334,19 @@ export const appState: AppStateContainer = {
   expFilter: 'alert',
   otherMenusOpen: false,
   inboundFilter: 'pending',
+  inboundPeriod: 'all',
+  inboundFrom: '',
+  inboundTo: '',
+  inboundSearch: '',
+  masukPeriod: 'all',
+  masukFrom: '',
+  masukTo: '',
+  masukStatus: 'all',
+  keluarPeriod: 'all',
+  keluarFrom: '',
+  keluarTo: '',
+  reportFilter: { category: 'all', period: 'all', from: '', to: '', status: 'all', q: '' },
+  masterSearch: '',
   rapidScanKeluar: false,
   lastRapidKeluarId: '',
   settingsTab: 'role',

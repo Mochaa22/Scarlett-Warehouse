@@ -1,13 +1,14 @@
 import { getMasukInboundMatch, isMasukAncanthoDone } from '../core/cycleCountEngine.ts';
 import { computeWarehouseAnalysis } from '../core/stockEngine.ts';
-import { curData, whPrefix, writeWarehouseData } from '../core/warehouseRegistry.ts';
+import { curData, getWhMeta, whPrefix, writeWarehouseData } from '../core/warehouseRegistry.ts';
 import { playBeep } from '../services/scannerService.ts';
 import { buildInboundWhatsappSlip, openWhatsappSlipModal } from '../services/transactionService.ts';
+import { exportFilteredSuratJalanExcel } from '../services/xlsxService.ts';
 import { appState, renderApp, safeGet } from '../state/store.ts';
 import { closeTextModal, confirmDialog, iconSvg, openCopyTSV, openTextModal, pageHeaderHtml, showToast } from '../ui/feedback.ts';
-import { classifyExpiry, esc, fmtNum, normBarcode, normSku, parseQty, todayISO } from '../utils/format.ts';
+import { classifyExpiry, esc, fmtNum, getPeriodFileSlug, getPeriodLabel, matchesDatePeriod, normBarcode, normSku, parseQty, todayISO } from '../utils/format.ts';
 import { renderInboundRegister } from './masukView.ts';
-import { byId } from '../utils/dom.ts';
+import { byId, targetEl } from '../utils/dom.ts';
 
 // === HALAMAN 2A: ANTREAN INBOUND & MATCHING ANCANTHO ===
 export function getAdminInboundMatches(rows, register) {
@@ -91,7 +92,12 @@ export function renderInbound(root, d, an) {
 
   var signedInUser = window.__sgpCloud && window.__sgpCloud.getUser && window.__sgpCloud.getUser();
   var activeAdminDefault = String((signedInUser && signedInUser.displayName) || appState.W.user || '').trim() || 'Admin Gudang';
+  var registerAll = safeGet(registerKey, []);
+  var qInb = String(appState.inboundSearch || '').trim().toUpperCase();
+  var inbPeriodLabel = getPeriodLabel(appState.inboundPeriod, appState.inboundFrom, appState.inboundTo);
+
   var rowsAdmin = allMasuk.filter(function (r) {
+    if (!matchesDatePeriod(r.tgl, appState.inboundPeriod, appState.inboundFrom, appState.inboundTo)) return false;
     var isDone = isMasukAncanthoDone(r);
     var im = adminMatch(r);
     if (appState.inboundFilter === 'pending' && isDone) return false;
@@ -99,7 +105,8 @@ export function renderInbound(root, d, an) {
     if (appState.inboundFilter === 'mismatch' && (isDone || !im.hasInbound || im.matched)) return false;
     if (appState.inboundFilter === 'unfilled' && (isDone || im.hasInbound)) return false;
     if (appState.inboundFilter === 'done' && !isDone) return false;
-    return true;
+    if (!qInb) return true;
+    return [r.tgl, r.supplier, r.driver, r.noPlat, im.noDoc || r.noDoc, r.barcode, r.sku, r.nama, r.lok, r.by, r.ancanthoBy, r.ancanthoKet].join(' ').toUpperCase().indexOf(qInb) >= 0;
   });
   var shownAdmin = rowsAdmin.slice(0, 120);
 
@@ -113,14 +120,30 @@ export function renderInbound(root, d, an) {
     '<button type="button" class="seg-btn' + (appState.inboundFilter === 'all' ? ' active' : '') + '" data-inb-filt="all">Semua (' + allMasuk.length + ')</button>' +
     '</div></div>' +
     '<div class="toolbar">' +
+    '<div class="search-wrap"><input id="search-inbound" type="search" class="input" placeholder="Cari produk, barcode, supplier, no doc, lokasi, PIC…" value="' + esc(appState.inboundSearch || '') + '" /><span class="search-kbd">/</span></div>' +
+    '<select id="inb-period-filt" class="input" style="max-width:170px" aria-label="Filter Periode Surat Jalan">' +
+    '<option value="all"' + (appState.inboundPeriod === 'all' ? ' selected' : '') + '>Semua Waktu</option>' +
+    '<option value="month"' + (appState.inboundPeriod === 'month' ? ' selected' : '') + '>Bulan Ini</option>' +
+    '<option value="today"' + (appState.inboundPeriod === 'today' ? ' selected' : '') + '>Hari Ini</option>' +
+    '<option value="week"' + (appState.inboundPeriod === 'week' ? ' selected' : '') + '>7 Hari Terakhir</option>' +
+    '<option value="prev_month"' + (appState.inboundPeriod === 'prev_month' ? ' selected' : '') + '>Bulan Lalu</option>' +
+    '<option value="custom"' + (appState.inboundPeriod === 'custom' ? ' selected' : '') + '>Rentang Tanggal</option>' +
+    '</select>' +
+    (appState.inboundPeriod === 'custom'
+      ? '<input id="inb-from" type="date" class="input" style="max-width:155px" value="' + esc(appState.inboundFrom || '') + '" aria-label="Dari tanggal" />' +
+        '<input id="inb-to" type="date" class="input" style="max-width:155px" value="' + esc(appState.inboundTo || '') + '" aria-label="Sampai tanggal" />'
+      : '') +
+    '<button type="button" class="btn btn-primary btn-sm" id="inbound-export-xlsx-btn">' + iconSvg('download') + '<span>Download Excel (.xlsx)</span></button>' +
+    '</div>' +
+    '<div class="toolbar">' +
     '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
     '<button type="button" class="btn" id="in-paste-inbound-btn">Tempel Stock Inbound</button>' +
     '<button type="button" class="btn btn-primary" id="inb-batch-done-btn"' + (matchedRows.length === 0 ? ' disabled' : '') + '>Submit Done Semua yang Match (' + matchedRows.length + ')</button>' +
-    '<button type="button" class="btn btn-primary" id="inb-selected-done-btn" disabled>Submit Done Pilihan (0)</button>' +
+    '<button type="button" class="btn btn-primary" id="inb-selected-done-btn" disabled>Bulk Submit Terpilih (0)</button>' +
     '<button type="button" class="btn" id="copy-inbound-btn">Salin ke Sheets</button>' +
     '</div></div>' +
     '<div class="table-wrap"><table><thead><tr>' +
-    '<th style="width:44px;text-align:center">Pilih</th>' +
+    '<th style="width:44px;text-align:center"><input type="checkbox" id="inb-select-all" class="masuk-chk" title="Pilih semua baris menunggu" aria-label="Pilih semua baris surat jalan" /></th>' +
     '<th>Stockkeeper &amp; Tgl</th>' +
     '<th>Produk &amp; Expire</th>' +
     '<th>Lokasi Transfer</th>' +
@@ -148,7 +171,11 @@ export function renderInbound(root, d, an) {
       var rowAdminVal = r.ancanthoBy || '';
       var rowInbVal = im.hasInbound ? String(im.inboundQty) : '';
       html += '<tr>' +
-        '<td style="text-align:center"><input type="checkbox" class="masuk-chk" data-admin-chk="' + esc(r.id) + '" data-done="' + isDone + '"' + (isDone || !im.hasInbound ? ' disabled' : '') + ' aria-label="Pilih transaksi untuk Submit Done" /></td>' +
+        '<td style="text-align:center">' +
+        (isDone
+          ? '<input type="checkbox" class="masuk-chk" checked disabled title="Sudah Done" aria-label="Sudah Done" />'
+          : '<input type="checkbox" class="masuk-chk" data-admin-chk="' + esc(r.id) + '" data-done="false" aria-label="Pilih baris surat jalan untuk Bulk Submit" />') +
+        '</td>' +
         '<td><div><strong>' + esc(r.by || '-') + '</strong></div><div class="muted num" style="font-size:11.5px">' + esc(r.tgl || '-') + '</div>' +
         '<div class="muted">' + esc([r.supplier, r.driver, r.noPlat, r.noDoc].filter(Boolean).join(' · ')) + '</div></td>' +
         '<td><div class="mono" style="font-size:12px">' + esc(r.barcode || r.sku || '-') + '</div><div style="font-size:12.5px">' + esc(r.nama || '-') + '</div>' + (r.exp ? '<div class="num" style="font-size:11.5px;margin-top:2px">Exp: ' + esc(r.exp) + expBadge + '</div>' : '') + '</td>' +
@@ -244,22 +271,48 @@ export function renderInbound(root, d, an) {
 
   var batchDoneBtn = byId('inb-batch-done-btn');
   var selectedDoneBtn = byId('inb-selected-done-btn');
-  function submitInboundRows(selectedIds) {
+  var selectAllChk = byId('inb-select-all') as HTMLInputElement;
+
+  function submitInboundRows(selectedIds: Set<string> | null) {
     var dNow = curData();
     var currentMatch = getAdminInboundMatches(dNow.masuk || [], safeGet(registerKey, []));
     var targets = (dNow.masuk || []).filter(function (r) {
       if (isMasukAncanthoDone(r)) return false;
-      var match = currentMatch(r);
-      return selectedIds ? selectedIds.has(String(r.id)) && match.hasInbound : match.matched;
+      if (selectedIds) return selectedIds.has(String(r.id));
+      return currentMatch(r).matched;
     });
     if (targets.length === 0) {
-      showToast(selectedIds ? 'Belum ada transaksi pilihan dengan Qty Inbound' : 'Belum ada antrean berstatus ✓ Match untuk di-submit', 'warn');
+      showToast(selectedIds ? 'Pilih minimal 1 baris Surat Jalan terlebih dahulu' : 'Belum ada antrean berstatus ✓ Match untuk di-submit', 'warn');
       return;
     }
+
+    // Sinkronkan input inline yang sedang diketik user sebelum submit massal
+    targets.forEach(function (r) {
+      var idSel = CSS.escape(String(r.id));
+      var byInp = root.querySelector('[data-admin-by="' + idSel + '"]') as HTMLInputElement | null;
+      var ketInp = root.querySelector('[data-admin-ket="' + idSel + '"]') as HTMLInputElement | null;
+      var inbInp = root.querySelector('[data-admin-inbound="' + idSel + '"]') as HTMLInputElement | null;
+      if (byInp && byInp.value.trim()) r.ancanthoBy = byInp.value.trim();
+      if (ketInp) r.ancanthoKet = ketInp.value.trim();
+      if (inbInp) {
+        var rawV = inbInp.value.trim();
+        r.inboundQty = rawV === '' ? null : parseQty(rawV);
+      }
+    });
+
+    var missingInboundCount = targets.filter(function (r) { return !currentMatch(r).hasInbound; }).length;
+    var mismatchCount = targets.filter(function (r) {
+      var m = currentMatch(r);
+      return m.hasInbound && !m.matched;
+    }).length;
+
     function commit() {
       var nowD = new Date();
       var nowStamp = todayISO() + ' ' + String(nowD.getHours()).padStart(2, '0') + ':' + String(nowD.getMinutes()).padStart(2, '0');
       targets.forEach(function (r) {
+        if (!currentMatch(r).hasInbound && (r.inboundQty === null || r.inboundQty === undefined)) {
+          r.inboundQty = Number(r.qty || 0);
+        }
         r.ancanthoDone = true;
         if (!r.ancanthoBy) r.ancanthoBy = activeAdminDefault;
         r.ancanthoAt = nowStamp;
@@ -267,15 +320,17 @@ export function renderInbound(root, d, an) {
       appState.masukAdminName = activeAdminDefault;
       writeWarehouseData(appState.W.cur, dNow);
       playBeep(true);
-      showToast(targets.length + ' transaksi berhasil ditandai Done', 'ok');
+      showToast('Bulk Submit berhasil: ' + targets.length + ' Surat Jalan ditandai Done', 'ok');
       renderApp();
     }
 
-    var mismatchCount = targets.filter(function (r) { return !currentMatch(r).matched; }).length;
-    if (mismatchCount) {
+    if (missingInboundCount > 0 || mismatchCount > 0) {
+      var msgParts: string[] = [];
+      if (missingInboundCount > 0) msgParts.push('<strong>' + missingInboundCount + '</strong> baris belum diisi Qty Surat Jalan (akan disamakan dengan Qty Stockkeeper)');
+      if (mismatchCount > 0) msgParts.push('<strong>' + mismatchCount + '</strong> baris memiliki selisih Qty');
       confirmDialog(
-        'Konfirmasi Selisih Qty',
-        '<p>' + mismatchCount + ' dari ' + targets.length + ' transaksi pilihan memiliki selisih Qty. Lanjut tandai semua pilihan sebagai Done?</p>',
+        'Konfirmasi Bulk Submit Surat Jalan',
+        '<p style="margin:0">' + msgParts.join(' dan ') + ' dari <strong>' + targets.length + '</strong> baris terpilih.<br/>Lanjutkan Bulk Submit semua baris terpilih sebagai Done?</p>',
         commit,
         true
       );
@@ -287,16 +342,35 @@ export function renderInbound(root, d, an) {
   batchDoneBtn.addEventListener('click', function () { submitInboundRows(null); });
   selectedDoneBtn.addEventListener('click', function () {
     var ids = Array.from(root.querySelectorAll('[data-admin-chk]:checked'), function (checkbox: Element) {
-      return checkbox.getAttribute('data-admin-chk');
-    });
+      return checkbox.getAttribute('data-admin-chk') || '';
+    }).filter(Boolean);
     submitInboundRows(new Set(ids));
   });
 
   function refreshSelectedDoneButton() {
-    var count = root.querySelectorAll('[data-admin-chk]:checked').length;
-    selectedDoneBtn.textContent = 'Submit Done Pilihan (' + count + ')';
+    var allPendingChks = Array.from(root.querySelectorAll('[data-admin-chk]')) as HTMLInputElement[];
+    var checkedChks = allPendingChks.filter(function (c) { return c.checked && !c.disabled; });
+    var count = checkedChks.length;
+    selectedDoneBtn.textContent = 'Bulk Submit Terpilih (' + count + ')';
     selectedDoneBtn.disabled = count === 0;
+    if (selectAllChk) {
+      selectAllChk.disabled = allPendingChks.length === 0;
+      selectAllChk.checked = allPendingChks.length > 0 && count === allPendingChks.length;
+      selectAllChk.indeterminate = count > 0 && count < allPendingChks.length;
+    }
   }
+
+  if (selectAllChk) {
+    selectAllChk.addEventListener('change', function () {
+      var checkAll = selectAllChk.checked;
+      root.querySelectorAll('[data-admin-chk]').forEach(function (chk) {
+        var el = chk as HTMLInputElement;
+        if (!el.disabled) el.checked = checkAll;
+      });
+      refreshSelectedDoneButton();
+    });
+  }
+  refreshSelectedDoneButton();
 
   function updateLiveMatchBadge(id, rawInb) {
     var badge = root.querySelector('[data-match-badge="' + id + '"]');
@@ -306,12 +380,6 @@ export function renderInbound(root, d, an) {
     var info = getMasukInboundMatch({ qty: skQty, inboundQty: rawInb === '' ? null : parseQty(rawInb) });
     badge.className = 'badge ' + info.cls;
     badge.textContent = info.label;
-    var checkbox = root.querySelector('[data-admin-chk="' + CSS.escape(id) + '"]');
-    if (checkbox && checkbox.dataset.done !== 'true') {
-      checkbox.disabled = !info.hasInbound;
-      if (!info.hasInbound) checkbox.checked = false;
-      refreshSelectedDoneButton();
-    }
   }
 
   function saveAdminRow(id, nextDone, onlyUpdateFields) {
@@ -433,6 +501,58 @@ export function renderInbound(root, d, an) {
       saveAdminRow(b.getAttribute('data-admin-undo'), false, false);
     });
   });
+
+  var searchInbEl = byId('search-inbound');
+  if (searchInbEl) {
+    searchInbEl.addEventListener('input', function (e) {
+      appState.inboundSearch = targetEl(e).value;
+      renderApp();
+      var s = byId('search-inbound');
+      if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+    });
+  }
+  var inbPeriodEl = byId('inb-period-filt') as HTMLSelectElement;
+  if (inbPeriodEl) {
+    inbPeriodEl.addEventListener('change', function () {
+      appState.inboundPeriod = inbPeriodEl.value || 'all';
+      renderApp();
+    });
+  }
+  var inbFromEl = byId('inb-from') as HTMLInputElement;
+  if (inbFromEl) {
+    inbFromEl.addEventListener('change', function () {
+      appState.inboundFrom = inbFromEl.value || '';
+      renderApp();
+    });
+  }
+  var inbToEl = byId('inb-to') as HTMLInputElement;
+  if (inbToEl) {
+    inbToEl.addEventListener('change', function () {
+      appState.inboundTo = inbToEl.value || '';
+      renderApp();
+    });
+  }
+
+  var inboundExportBtn = byId('inbound-export-xlsx-btn');
+  if (inboundExportBtn) {
+    inboundExportBtn.addEventListener('click', function () {
+      var filteredReg = (registerAll || []).slice().reverse().filter(function (ib) {
+        if (!matchesDatePeriod(ib.tgl, appState.inboundPeriod, appState.inboundFrom, appState.inboundTo)) return false;
+        if (!qInb) return true;
+        return [ib.tgl, ib.supplier, ib.driver, ib.noPlat, ib.noDoc, ib.barcode, ib.sku, ib.nama].join(' ').toUpperCase().indexOf(qInb) >= 0;
+      });
+      exportFilteredSuratJalanExcel(
+        getWhMeta(appState.W.cur).nama,
+        rowsAdmin,
+        filteredReg,
+        adminMatch,
+        {
+          label: inbPeriodLabel,
+          slug: getPeriodFileSlug(appState.inboundPeriod, appState.inboundFrom, appState.inboundTo)
+        }
+      );
+    });
+  }
 
   var copyInbBtn = byId('copy-inbound-btn');
   if (copyInbBtn) {

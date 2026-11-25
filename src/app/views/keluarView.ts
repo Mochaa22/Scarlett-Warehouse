@@ -1,13 +1,14 @@
 import { isMasukAncanthoDone } from '../core/cycleCountEngine.ts';
 import { buildFefoLocationSuggestions, computeStockForMode, computeWarehouseAnalysis, findMasterByBarcode, findMasterBySku, validateKeluarItem } from '../core/stockEngine.ts';
-import { curData, saveRegistry, writeWarehouseData } from '../core/warehouseRegistry.ts';
+import { curData, getWhMeta, saveRegistry, writeWarehouseData } from '../core/warehouseRegistry.ts';
 import { openCameraScanner, playBeep } from '../services/scannerService.ts';
 import { buildKeluarWhatsappSlip, openWhatsappSlipModal, removeTxSafely } from '../services/transactionService.ts';
+import { exportFilteredOutboundExcel } from '../services/xlsxService.ts';
 import { SOUND_KEY, appState, renderApp, safeSet } from '../state/store.ts';
 import { openBulkTxModal } from '../ui/bulkTxModal.ts';
 import { confirmDialog, iconSvg, openCopyTSV, pageHeaderHtml, showToast } from '../ui/feedback.ts';
 import { getEffectiveRole } from '../ui/rbac.ts';
-import { classifyExpiry, esc, fmtNum, normBarcode, normLoc, normSku, parseExpDate, parseQty, stockKey, todayISO, uid } from '../utils/format.ts';
+import { classifyExpiry, esc, fmtNum, getPeriodFileSlug, getPeriodLabel, matchesDatePeriod, normBarcode, normLoc, normSku, parseExpDate, parseQty, stockKey, todayISO, uid } from '../utils/format.ts';
 import { byId, targetEl } from '../utils/dom.ts';
 
 // === HALAMAN 3: BARANG KELUAR (STOCKKEEPER & ADMIN ANCANTHO) ===
@@ -45,6 +46,22 @@ export function renderKeluar(root, d, an) {
   );
 
   var q = appState.searchState.keluar.trim().toUpperCase();
+  var keluarPeriodLabel = getPeriodLabel(appState.keluarPeriod, appState.keluarFrom, appState.keluarTo);
+  var keluarToolbarControls =
+    '<select id="keluar-period-filt" class="input" style="max-width:170px" aria-label="Filter Periode Barang Keluar">' +
+    '<option value="all"' + (appState.keluarPeriod === 'all' ? ' selected' : '') + '>Semua Waktu</option>' +
+    '<option value="month"' + (appState.keluarPeriod === 'month' ? ' selected' : '') + '>Bulan Ini</option>' +
+    '<option value="today"' + (appState.keluarPeriod === 'today' ? ' selected' : '') + '>Hari Ini</option>' +
+    '<option value="week"' + (appState.keluarPeriod === 'week' ? ' selected' : '') + '>7 Hari Terakhir</option>' +
+    '<option value="prev_month"' + (appState.keluarPeriod === 'prev_month' ? ' selected' : '') + '>Bulan Lalu</option>' +
+    '<option value="custom"' + (appState.keluarPeriod === 'custom' ? ' selected' : '') + '>Rentang Tanggal</option>' +
+    '</select>' +
+    (appState.keluarPeriod === 'custom'
+      ? '<input id="keluar-from" type="date" class="input" style="max-width:155px" value="' + esc(appState.keluarFrom || '') + '" aria-label="Dari tanggal" />' +
+        '<input id="keluar-to" type="date" class="input" style="max-width:155px" value="' + esc(appState.keluarTo || '') + '" aria-label="Sampai tanggal" />'
+      : '') +
+    '<button type="button" class="btn btn-primary btn-sm" id="keluar-export-xlsx-btn">' + iconSvg('download') + '<span>Download Excel (.xlsx)</span></button>';
+  var activeFilteredKeluar: any[] = [];
 
   if (appState.keluarRole === 'stockkeeper') {
     var pre = window.__keluarPrefill || null;
@@ -105,15 +122,18 @@ export function renderKeluar(root, d, an) {
       '</div>';
 
     var rowsSk = allKeluar.filter(function (r) {
+      if (!matchesDatePeriod(r.tgl, appState.keluarPeriod, appState.keluarFrom, appState.keluarTo)) return false;
       if (!q) return true;
       return [r.tgl, r.by, r.barcode, r.sku, r.nama, r.lok, r.exp, r.ancanthoBy, r.ancanthoKet].join(' ').toUpperCase().indexOf(q) >= 0;
     });
+    activeFilteredKeluar = rowsSk;
     var shownSk = rowsSk.slice(0, 100);
 
-    html += '<div class="card"><div class="card-header"><h2 class="card-title">Riwayat Input Stockkeeper</h2><span class="muted" style="font-size:12px">Klik Edit jika ada salah input (' + shownSk.length + '/' + rowsSk.length + ' baris)</span></div>' +
+    html += '<div class="card"><div class="card-header"><h2 class="card-title">Riwayat Input Stockkeeper</h2><span class="muted" style="font-size:12px">Klik Edit jika ada salah input (' + shownSk.length + '/' + rowsSk.length + ' baris · ' + esc(keluarPeriodLabel) + ')</span></div>' +
       '<div class="toolbar">' +
       '<div class="search-wrap"><input id="search-keluar" type="search" class="input" placeholder="Cari stockkeeper, barcode, produk, lokasi…" value="' + esc(appState.searchState.keluar) + '" /><span class="search-kbd">/</span></div>' +
-      '<button type="button" class="btn" id="copy-keluar-btn">Salin ke Sheets</button>' +
+      keluarToolbarControls +
+      '<button type="button" class="btn btn-sm" id="copy-keluar-btn">Salin ke Sheets</button>' +
       '</div>' +
       '<div class="table-wrap"><table><thead><tr><th>Tanggal</th><th>Stockkeeper</th><th>Barcode / Produk</th><th>Lokasi</th><th>Expiry Date</th><th class="right">Qty</th><th>Status Validasi</th><th>Status Ancantho</th><th class="right">Aksi</th></tr></thead><tbody>';
 
@@ -689,12 +709,14 @@ export function renderKeluar(root, d, an) {
       '</div>';
 
     var rowsAdmin = allKeluar.filter(function (r) {
+      if (!matchesDatePeriod(r.tgl, appState.keluarPeriod, appState.keluarFrom, appState.keluarTo)) return false;
       var isDone = isMasukAncanthoDone(r);
       if (appState.keluarAdminFilter === 'pending' && isDone) return false;
       if (appState.keluarAdminFilter === 'done' && !isDone) return false;
       if (!q) return true;
       return [r.tgl, r.by, r.barcode, r.sku, r.nama, r.lok, r.exp, r.ancanthoBy, r.ancanthoKet].join(' ').toUpperCase().indexOf(q) >= 0;
     });
+    activeFilteredKeluar = rowsAdmin;
     var shownAdmin = rowsAdmin.slice(0, 120);
 
     html += '<div class="card">' +
@@ -707,7 +729,8 @@ export function renderKeluar(root, d, an) {
       '</div></div></div>' +
       '<div class="toolbar">' +
       '<div class="search-wrap"><input id="search-keluar" type="search" class="input" placeholder="Cari stockkeeper, barcode, lokasi, admin, keterangan…" value="' + esc(appState.searchState.keluar) + '" /><span class="search-kbd">/</span></div>' +
-      '<button type="button" class="btn" id="copy-keluar-btn">Salin ke Sheets</button>' +
+      keluarToolbarControls +
+      '<button type="button" class="btn btn-sm" id="copy-keluar-btn">Salin ke Sheets</button>' +
       '</div>' +
       '<div class="table-wrap"><table><thead><tr>' +
       '<th style="width:44px;text-align:center">Done</th>' +
@@ -875,17 +898,51 @@ export function renderKeluar(root, d, an) {
     });
   }
 
+  var keluarPeriodEl = byId('keluar-period-filt') as HTMLSelectElement;
+  if (keluarPeriodEl) {
+    keluarPeriodEl.addEventListener('change', function () {
+      appState.keluarPeriod = keluarPeriodEl.value || 'all';
+      renderApp();
+    });
+  }
+  var keluarFromEl = byId('keluar-from') as HTMLInputElement;
+  if (keluarFromEl) {
+    keluarFromEl.addEventListener('change', function () {
+      appState.keluarFrom = keluarFromEl.value || '';
+      renderApp();
+    });
+  }
+  var keluarToEl = byId('keluar-to') as HTMLInputElement;
+  if (keluarToEl) {
+    keluarToEl.addEventListener('change', function () {
+      appState.keluarTo = keluarToEl.value || '';
+      renderApp();
+    });
+  }
+
+  var keluarExportBtn = byId('keluar-export-xlsx-btn');
+  if (keluarExportBtn) {
+    keluarExportBtn.addEventListener('click', function () {
+      exportFilteredOutboundExcel(
+        getWhMeta(appState.W.cur).nama,
+        d,
+        an,
+        activeFilteredKeluar,
+        {
+          label: keluarPeriodLabel,
+          slug: getPeriodFileSlug(appState.keluarPeriod, appState.keluarFrom, appState.keluarTo)
+        }
+      );
+    });
+  }
+
   var copyBtn = byId('copy-keluar-btn');
   if (copyBtn) {
     copyBtn.addEventListener('click', function () {
-      var exportRows = allKeluar.filter(function (r) {
-        if (!q) return true;
-        return [r.tgl, r.by, r.barcode, r.sku, r.nama, r.lok, r.exp, r.ancanthoBy, r.ancanthoKet].join(' ').toUpperCase().indexOf(q) >= 0;
-      });
       openCopyTSV(
         'Salin Barang Keluar & Status Ancantho',
         ['Tanggal', 'Stockkeeper', 'Barcode', 'SKU', 'Nama Produk', 'Lokasi', 'Expiry Date', 'Qty', 'Status Validasi', 'Status Ancantho', 'Admin Ancantho', 'Keterangan Admin', 'Waktu Done'],
-        exportRows.map(function (r) {
+        activeFilteredKeluar.map(function (r) {
           var st = validateKeluarItem(r, d, an.stockMap, false);
           return [
             r.tgl,
