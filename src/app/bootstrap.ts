@@ -12,12 +12,11 @@ import {
   ACTIVE_TAB_KEY,
   THEME_KEY,
   appState,
-  decodeTokenPayload,
   registerAppRenderer,
   safeGet,
   sessionSetRaw,
 } from './state/store.ts';
-import { initAppAuthGate, setAuthUnlockedState } from './ui/authGate.ts';
+import { initAppAuthGate } from './ui/authGate.ts';
 import { closeBulkTxModal } from './ui/bulkTxModal.ts';
 import { renderChrome } from './ui/chrome.ts';
 import {
@@ -238,20 +237,11 @@ export function bootWarehouseApp(): void {
   bindGlobalControls();
   applyTheme(safeGet(THEME_KEY, 'auto'));
 
-  const bootAuthPayload = decodeTokenPayload(appState.appAuthToken);
-  if (bootAuthPayload && bootAuthPayload.sub) {
-    appState.appAuthStatusCache.loaded = true;
-    appState.appAuthStatusCache.configured = true;
-    setAuthUnlockedState(true, bootAuthPayload.sub, bootAuthPayload.role || 'stockkeeper', {
-      skipRemoteCheck: true,
-    });
-  } else {
-    try {
-      renderApp();
-    } catch (bootErr) {
-      console.error(bootErr);
-    }
+  try {
+    renderApp();
+  } catch (bootErr) {
+    console.error(bootErr);
   }
 
-  void initAppAuthGate(Boolean(bootAuthPayload && bootAuthPayload.sub));
+  void initAppAuthGate(false);
 }

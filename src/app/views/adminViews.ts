@@ -1,4 +1,4 @@
-import { buildSampleData } from '../core/seedData.ts';
+import { buildSampleData, isLocalDevEnvironment } from '../core/seedData.ts';
 import { computeWarehouseAnalysis } from '../core/stockEngine.ts';
 import { curData, defaultWhData, deleteWarehouseStorage, getWhMeta, readWarehouseData, saveRegistry, writeWarehouseData } from '../core/warehouseRegistry.ts';
 import { exportAllDatabaseExcel, importWorkbookToActive, parseDelimitedLines } from '../services/xlsxService.ts';
@@ -461,35 +461,34 @@ export function renderPengaturan(root, d) {
   if (appState.settingsTab === 'role') {
     var pinConfigured = !!appState.pinStatusCache.configured;
     var activeRoleNow = getEffectiveRole();
-    var storageLabel = appState.sharedSyncState.storageMode === 'redis'
-      ? 'Redis / Vercel KV (Sinkron Lintas Perangkat)'
-      : (appState.sharedSyncState.storageMode === 'ephemeral'
-          ? 'Serverless Sementara (Pasang Vercel KV / Upstash agar data & akun tersimpan lintas perangkat)'
-          : 'File Server Persisten (Sinkron Lintas Perangkat)');
+    var storageLabel = appState.sharedSyncState.storageMode === 'firestore'
+      ? 'Firebase Firestore (Cloud Persisten & Sinkron Real-Time)'
+      : (appState.sharedSyncState.storageMode === 'redis'
+          ? 'Redis / Vercel KV (Sinkron Lintas Perangkat)'
+          : (appState.sharedSyncState.storageMode === 'ephemeral'
+              ? 'Penyimpanan Sementara'
+              : 'File Server Persisten (Sinkron Lintas Perangkat)'));
 
     html += '<div class="grid-2">' +
       '<div class="card"><div class="card-header"><h2 class="card-title">Sesi Login &amp; Hak Akses</h2>' +
       '<span class="badge badge-info">' + esc(ROLE_LABELS[activeRoleNow]) + '</span></div>' +
       '<div class="inline-alert info" style="margin-bottom:14px">' +
-      'Setiap pengguna yang masuk melalui email &amp; password otomatis memulai sesi sebagai <strong>Stockkeeper</strong>. Akses <strong>Admin</strong> dan <strong>Super Admin</strong> hanya dapat dibuka dengan memasukkan PIN.' +
+      'Setiap pengguna yang masuk melalui akun Google otomatis memulai sesi sebagai <strong>Stockkeeper</strong>. Akses <strong>Admin</strong> dan <strong>Super Admin</strong> hanya dapat dibuka dengan memasukkan PIN.' +
       '</div>' +
-      (!appState.sharedSyncState.hasSessionSecret
-        ? '<div class="inline-alert warn" style="margin-bottom:12px;font-size:12.5px">Tambahkan <code>PIN_SESSION_SECRET</code> (min. 16 karakter) di Environment Variables server/Vercel agar sesi login stabil di semua instance.</div>'
-        : '') +
       '<div style="display:flex;flex-direction:column;gap:8px;font-size:13px">' +
-      '<div><span class="muted">Email Login Aktif:</span> <strong>' + esc(appState.appAuthEmail || appState.W.user || '-') + '</strong></div>' +
+      '<div><span class="muted">Akun Google Aktif:</span> <strong>' + esc(appState.appAuthEmail || appState.W.user || '-') + '</strong></div>' +
       '<div><span class="muted">Role Default Setelah Login:</span> <strong>Stockkeeper</strong></div>' +
       '<div><span class="muted">Status Sesi PIN:</span> <strong>' + (appState.pinSessionToken && appState.pinSessionRole ? ('Terbuka (' + esc(ROLE_LABELS[appState.pinSessionRole]) + ')') : 'Terkunci (Stockkeeper)') + '</strong></div>' +
-      '<div><span class="muted">Mode Penyimpanan Server:</span> <strong>' + esc(storageLabel) + '</strong> (Revisi #' + esc(appState.sharedSyncState.revision) + ')</div>' +
+      '<div><span class="muted">Database Cloud:</span> <strong>' + esc(storageLabel) + '</strong> (Sinkron #' + esc(appState.sharedSyncState.revision) + ')</div>' +
       '</div>' +
       (appState.pinSessionToken ? '<div style="margin-top:14px"><button type="button" class="btn btn-danger" id="session-lock-btn">Kunci Akses PIN &amp; Kembali ke Stockkeeper</button></div>' : '') +
       '</div>';
 
     html += '<div class="card"><div class="card-header"><h2 class="card-title">PIN Akses Admin &amp; Super Admin</h2>' +
       '<span class="badge ' + (pinConfigured ? 'badge-ok' : 'badge-warn') + '">' +
-      (appState.pinStatusCache.envManaged ? 'Server Env' : (pinConfigured ? 'PIN Aktif' : 'Belum Diatur')) +
+      (appState.pinStatusCache.envManaged ? 'Server Env' : (pinConfigured ? 'PIN Aktif (Cloud)' : 'Belum Diatur')) +
       '</span></div>' +
-      '<p class="muted" style="margin-top:0;font-size:12.5px">PIN diverifikasi langsung oleh server agar perpindahan ke role Admin dan Super Admin tetap terlindungi setelah login Stockkeeper.</p>';
+      '<p class="muted" style="margin-top:0;font-size:12.5px">PIN tersimpan terenkripsi di Firebase Firestore agar perpindahan ke role Admin dan Super Admin tetap terlindungi di semua perangkat.</p>';
 
     if (appState.pinStatusCache.envManaged) {
       html += '<div class="inline-alert info">PIN dikelola melalui environment variable server (<code>ADMIN_BACKUP_PIN</code> &amp; <code>SUPER_ADMIN_BACKUP_PIN</code>).</div>';
@@ -508,15 +507,14 @@ export function renderPengaturan(root, d) {
     html += '</div></div>';
 
     html += '<div class="card" style="margin-top:14px"><div class="card-header">' +
-      '<h2 class="card-title">Akun Operator (Multi-User &amp; Multi-Device)</h2>' +
-      '<span class="badge badge-info">Masuk sebagai Stockkeeper</span></div>' +
-      '<p class="muted" style="margin-top:0;font-size:12.5px">Tambahkan akun email &amp; password berbeda untuk masing-masing petugas gudang. Semua akun operator berbagi data gudang yang sama secara langsung.</p>' +
+      '<h2 class="card-title">Akses Tim Google (Multi-User &amp; Multi-Device)</h2>' +
+      '<span class="badge badge-info">Masuk via Google</span></div>' +
+      '<p class="muted" style="margin-top:0;font-size:12.5px">Daftarkan alamat email Google petugas gudang agar mereka dapat langsung login dengan Google dan mengakses database Firebase gudang yang sama secara real-time.</p>' +
       '<div class="grid-2">' +
       '<form id="form-add-operator-user">' +
-      '<div class="field" style="margin-bottom:10px"><label for="op-email">Email Operator</label><input id="op-email" type="email" class="input" required placeholder="operator@scarlett.id" autocomplete="off" /></div>' +
-      '<div class="field" style="margin-bottom:10px"><label for="op-name">Nama Operator</label><input id="op-name" type="text" class="input" maxlength="80" placeholder="Mis. Budi / Shift Malam" /></div>' +
-      '<div class="field" style="margin-bottom:14px"><label for="op-password">Password (min. 6 karakter)</label><input id="op-password" type="password" class="input" required minlength="6" maxlength="128" autocomplete="new-password" placeholder="Masukkan password operator" /></div>' +
-      '<button type="submit" class="btn btn-primary">Tambah / Perbarui Akun Operator</button>' +
+      '<div class="field" style="margin-bottom:10px"><label for="op-email">Email Google Operator</label><input id="op-email" type="email" class="input" required placeholder="operator@gmail.com" autocomplete="off" /></div>' +
+      '<div class="field" style="margin-bottom:14px"><label for="op-name">Nama Operator</label><input id="op-name" type="text" class="input" maxlength="80" placeholder="Mis. Budi / Shift Malam" /></div>' +
+      '<button type="submit" class="btn btn-primary">Tambah / Perbarui Akses Operator</button>' +
       '</form>' +
       '<div><div id="operator-users-list"><p class="muted" style="font-size:13px;margin:0">Memuat daftar akun…</p></div></div>' +
       '</div></div>';
@@ -596,37 +594,32 @@ export function renderPengaturan(root, d) {
         var data = await window.__sgpCloud.appAuth.listUsers(appState.pinSessionToken || null, appState.appAuthToken || null);
         var rowsHtml = '';
         if (data.primaryEmail) {
-          rowsHtml += '<tr><td><strong>' + esc(data.primaryEmail) + '</strong></td><td>Akun Utama</td><td>' +
-            (data.primarySource === 'env' ? '<span class="badge badge-info">Env Server</span>' : '<span class="badge badge-ok">Utama</span>') +
-            '</td><td></td></tr>';
+          rowsHtml += '<tr><td><strong>' + esc(data.primaryEmail) + '</strong></td><td>Akun Aktif</td><td><span class="badge badge-ok">Google Auth</span></td><td></td></tr>';
         }
-        (data.envUsers || []).forEach(function (u) {
-          rowsHtml += '<tr><td>' + esc(u.email) + '</td><td>' + esc(u.name || '-') + '</td><td><span class="badge badge-info">Env Server</span></td><td></td></tr>';
-        });
         (data.users || []).forEach(function (u) {
-          rowsHtml += '<tr><td>' + esc(u.email) + '</td><td>' + esc(u.name || '-') + '</td><td><span class="badge badge-ok">Aktif</span></td>' +
+          rowsHtml += '<tr><td>' + esc(u.email) + '</td><td>' + esc(u.name || '-') + '</td><td><span class="badge badge-ok">Firebase</span></td>' +
             '<td class="right"><button type="button" class="btn btn-sm btn-danger" data-del-op="' + esc(u.email) + '">Hapus</button></td></tr>';
         });
         if (!rowsHtml) {
           box.innerHTML = '<p class="muted" style="font-size:13px;margin:0">Belum ada akun operator tambahan.</p>';
           return;
         }
-        box.innerHTML = '<div class="table-wrap" style="max-height:240px"><table><thead><tr><th>Email</th><th>Nama</th><th>Sumber</th><th></th></tr></thead><tbody>' +
+        box.innerHTML = '<div class="table-wrap" style="max-height:240px"><table><thead><tr><th>Email Google</th><th>Nama</th><th>Sumber</th><th></th></tr></thead><tbody>' +
           rowsHtml + '</tbody></table></div>';
         box.querySelectorAll('[data-del-op]').forEach(function (btn) {
           btn.addEventListener('click', function () {
             var targetEmail = btn.getAttribute('data-del-op');
             if (!targetEmail) return;
             confirmDialog(
-              'Hapus Akun Operator',
+              'Hapus Akses Operator',
               '<p style="margin:0">Cabut akses login untuk <strong>' + esc(targetEmail) + '</strong>?</p>',
               async function () {
                 try {
                   await window.__sgpCloud.appAuth.deleteUser(targetEmail, appState.pinSessionToken || null, appState.appAuthToken || null);
-                  showToast('Akun operator dihapus: ' + targetEmail, 'ok');
+                  showToast('Akses operator dihapus: ' + targetEmail, 'ok');
                   void loadAndRenderOperatorUsers();
                 } catch (err) {
-                  showToast((err && err.message) || 'Gagal menghapus akun operator', 'err');
+                  showToast((err && err.message) || 'Gagal menghapus akses operator', 'err');
                 }
               },
               true
@@ -644,20 +637,18 @@ export function renderPengaturan(root, d) {
         e.preventDefault();
         var emailVal = byId('op-email').value.trim();
         var nameVal = byId('op-name').value.trim();
-        var pwVal = byId('op-password').value;
         try {
           await window.__sgpCloud.appAuth.saveUser(
-            { email: emailVal, name: nameVal, password: pwVal },
+            { email: emailVal, name: nameVal, role: 'stockkeeper' },
             appState.pinSessionToken || null,
             appState.appAuthToken || null
           );
           byId('op-email').value = '';
           byId('op-name').value = '';
-          byId('op-password').value = '';
-          showToast('Akun operator disimpan: ' + emailVal, 'ok');
+          showToast('Akses Google operator disimpan: ' + emailVal, 'ok');
           void loadAndRenderOperatorUsers();
         } catch (err) {
-          showToast((err && err.message) || 'Gagal menyimpan akun operator', 'err');
+          showToast((err && err.message) || 'Gagal menyimpan akses operator', 'err');
         }
       });
     }
@@ -727,15 +718,17 @@ export function renderPengaturan(root, d) {
     '<div class="field" style="margin-bottom:12px"><label for="cfg-cover">Target Cover Stok Analitik (Hari)</label><input id="cfg-cover" type="number" min="1" class="input num" value="' + esc(d.cover) + '" /></div>' +
     '<div class="field" style="margin-bottom:14px"><label for="cfg-exp-months">Ambang Deteksi Expire Otomatis (Bulan)</label><input id="cfg-exp-months" type="number" min="1" max="36" class="input num" value="' + esc(d.expMonths || 7) + '" /></div>' +
     '<button type="submit" class="btn btn-primary">Simpan Pengaturan</button>' +
-    '</form></div>' +
+    '</form></div>';
 
-    '<div class="card"><div class="card-header"><h2 class="card-title">Cadangan, Pemulihan &amp; Publikasi</h2></div>' +
+  var canSeedDev = isLocalDevEnvironment();
+
+  html += '<div class="card"><div class="card-header"><h2 class="card-title">Cadangan, Pemulihan &amp; Publikasi</h2></div>' +
     '<div style="display:flex;flex-direction:column;gap:10px">' +
     '<button type="button" class="btn btn-primary" id="btn-export-all-xlsx">' + iconSvg('download') + '<span>Download Semua Database Excel (.xlsx)</span></button>' +
     '<button type="button" class="btn" id="btn-copy-html">Salin HTML Mandiri (Siap Publikasi)</button>' +
     '<button type="button" class="btn" id="btn-backup-json">Backup JSON Semua Gudang</button>' +
     '<button type="button" class="btn" id="btn-restore-json">Pulihkan Data (JSON Lama / Multi-Gudang)</button>' +
-    '<button type="button" class="btn" id="btn-load-sample">Muat Data Contoh ke Gudang Aktif</button>' +
+    (canSeedDev ? '<button type="button" class="btn" id="btn-load-sample">Muat Data Contoh (Dev Only)</button>' : '') +
     '<button type="button" class="btn btn-danger" id="btn-reset-wh">Reset Gudang Aktif</button>' +
     '</div>' +
     '<p class="form-hint">Tombol "Salin HTML Mandiri" menghasilkan satu file .html utuh tanpa framework untuk disimpan dan dipublikasikan di hosting web mana pun.</p>' +
@@ -842,18 +835,21 @@ export function renderPengaturan(root, d) {
     });
   });
 
-  byId('btn-load-sample').addEventListener('click', function () {
-    confirmDialog(
-      'Muat Data Contoh',
-      '<p style="margin:0">Data gudang aktif (<strong>' + esc(getWhMeta(appState.W.cur).nama) + '</strong>) akan diganti dengan data contoh Scarlett GP1. Lanjutkan?</p>',
-      function () {
-        writeWarehouseData(appState.W.cur, buildSampleData());
-        showToast('Data contoh berhasil dimuat', 'ok');
-        renderApp();
-      },
-      false
-    );
-  });
+  var loadSampleBtn = byId('btn-load-sample');
+  if (loadSampleBtn && canSeedDev) {
+    loadSampleBtn.addEventListener('click', function () {
+      confirmDialog(
+        'Muat Data Contoh (Development)',
+        '<p style="margin:0">Data gudang aktif (<strong>' + esc(getWhMeta(appState.W.cur).nama) + '</strong>) akan diganti dengan data contoh. Lanjutkan?</p>',
+        function () {
+          writeWarehouseData(appState.W.cur, buildSampleData());
+          showToast('Data contoh berhasil dimuat', 'ok');
+          renderApp();
+        },
+        false
+      );
+    });
+  }
 
   byId('btn-reset-wh').addEventListener('click', function () {
     confirmDialog(

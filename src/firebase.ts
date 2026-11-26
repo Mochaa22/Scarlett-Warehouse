@@ -1,11 +1,50 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import { GoogleAuthProvider, getAuth } from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
-import firebaseConfig from '../firebase-applet-config.json';
+import bundledConfig from '../firebase-applet-config.json';
 
-const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+const viteEnv =
+  (import.meta as unknown as { env?: Record<string, string | undefined> }).env || {};
+
+function readFirebaseEnv(key: string, fallback: string): string {
+  const value = String(viteEnv[key] || '').trim();
+  return value || fallback;
+}
+
+export const firebaseRuntimeConfig = {
+  apiKey: readFirebaseEnv('VITE_FIREBASE_API_KEY', bundledConfig.apiKey),
+  authDomain: readFirebaseEnv('VITE_FIREBASE_AUTH_DOMAIN', bundledConfig.authDomain),
+  projectId: readFirebaseEnv('VITE_FIREBASE_PROJECT_ID', bundledConfig.projectId),
+  storageBucket: readFirebaseEnv('VITE_FIREBASE_STORAGE_BUCKET', bundledConfig.storageBucket),
+  messagingSenderId: readFirebaseEnv(
+    'VITE_FIREBASE_MESSAGING_SENDER_ID',
+    bundledConfig.messagingSenderId
+  ),
+  appId: readFirebaseEnv('VITE_FIREBASE_APP_ID', bundledConfig.appId),
+  measurementId: readFirebaseEnv(
+    'VITE_FIREBASE_MEASUREMENT_ID',
+    bundledConfig.measurementId || ''
+  ),
+};
+
+export const firebaseDatabaseId = readFirebaseEnv(
+  'VITE_FIREBASE_DATABASE_ID',
+  bundledConfig.firestoreDatabaseId || ''
+);
+
+if (!firebaseRuntimeConfig.apiKey || !firebaseRuntimeConfig.projectId) {
+  console.error(
+    'Konfigurasi Firebase belum lengkap. Pastikan variabel VITE_FIREBASE_* atau firebase-applet-config.json sudah terisi.'
+  );
+}
+
+const app = initializeApp(firebaseRuntimeConfig);
+export const db = firebaseDatabaseId
+  ? getFirestore(app, firebaseDatabaseId)
+  : getFirestore(app);
 export const auth = getAuth(app);
+export const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 export enum OperationType {
   CREATE = 'create',

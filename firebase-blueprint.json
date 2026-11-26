@@ -52,6 +52,22 @@
       },
       "required": ["uid", "email", "grantedAt"]
     },
+    "PinConfig": {
+      "title": "PinConfig",
+      "description": "Cloud-persisted salted PBKDF2 PIN hashes for Admin and Super Admin role unlocking.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "adminHash": { "type": "string", "minLength": 10, "maxLength": 256 },
+        "superAdminHash": { "type": "string", "minLength": 10, "maxLength": 256 },
+        "updatedBy": { "type": "string", "maxLength": 254 },
+        "memberEmails": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "adminHash", "superAdminHash", "updatedBy", "createdAt", "updatedAt"]
+    },
     "Warehouse": {
       "title": "Warehouse",
       "description": "Warehouse configuration and stock thresholds.",
@@ -61,11 +77,14 @@
         "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "kode": { "type": "string", "minLength": 1, "maxLength": 32 },
         "nama": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "legacy": { "type": "boolean" },
+        "order": { "type": "number" },
         "cutoff": { "type": "string", "maxLength": 32 },
         "minStock": { "type": "number" },
         "mode": { "type": "string", "enum": ["mutasi", "all"] },
         "coverDays": { "type": "number" },
         "expMonths": { "type": "number" },
+        "memberEmails": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -86,6 +105,7 @@
         "kategori": { "type": "string", "maxLength": 128 },
         "lok": { "type": "string", "maxLength": 128 },
         "qty": { "type": "number" },
+        "memberEmails": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -127,6 +147,8 @@
         "noDoc": { "type": "string", "maxLength": 128 },
         "pairId": { "type": "string", "maxLength": 128 },
         "partnerWhId": { "type": "string", "maxLength": 128 },
+        "defectRefId": { "type": "string", "maxLength": 128 },
+        "memberEmails": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -149,9 +171,10 @@
         "batch": { "type": "string", "maxLength": 128 },
         "exp": { "type": "string", "maxLength": 32 },
         "qty": { "type": "number" },
-        "status": { "type": "string", "enum": ["AKTIF", "KARANTINA", "SELESAI"] },
+        "status": { "type": "string", "enum": ["AKTIF", "KARANTINA", "SELESAI", "HABIS"] },
         "ket": { "type": "string", "maxLength": 500 },
         "by": { "type": "string", "maxLength": 120 },
+        "memberEmails": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -174,13 +197,16 @@
         "qty": { "type": "number" },
         "ket": { "type": "string", "maxLength": 500 },
         "by": { "type": "string", "maxLength": 120 },
-        "status": { "type": "string", "enum": ["KARANTINA", "RETUR", "MUSNAH", "REPACK"] },
+        "status": { "type": "string", "enum": ["KARANTINA", "RETUR", "RETUR SUPPLIER", "MUSNAH", "REPACK"] },
         "tindakLanjut": { "type": "string", "maxLength": 256 },
         "resolvedAt": { "type": "string", "maxLength": 32 },
         "sumber": { "type": "string", "maxLength": 64 },
         "batch": { "type": "string", "maxLength": 128 },
         "exp": { "type": "string", "maxLength": 32 },
         "potongStok": { "type": "boolean" },
+        "n": { "type": "number" },
+        "outId": { "type": "string", "maxLength": 128 },
+        "memberEmails": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -197,11 +223,14 @@
         "tgl": { "type": "string", "maxLength": 32 },
         "picAdmin": { "type": "string", "maxLength": 120 },
         "picField": { "type": "string", "maxLength": 120 },
-        "status": { "type": "string", "enum": ["OPEN", "SELESAI"] },
+        "status": { "type": "string", "enum": ["OPEN", "AKTIF", "SELESAI"] },
         "notes": { "type": "string", "maxLength": 500 },
         "judul": { "type": "string", "maxLength": 160 },
         "blindCount": { "type": "boolean" },
         "closedAt": { "type": "string", "maxLength": 32 },
+        "createdBy": { "type": "string", "maxLength": 120 },
+        "createdAtStr": { "type": "string", "maxLength": 64 },
+        "memberEmails": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -228,7 +257,8 @@
         "countedBy": { "type": "string", "maxLength": 120 },
         "countedAt": { "type": "string", "maxLength": 32 },
         "notes": { "type": "string", "maxLength": 500 },
-        "status": { "type": "string", "enum": ["PENDING", "COUNTED", "VERIFIED"] },
+        "status": { "type": "string", "enum": ["PENDING", "COUNTED", "VERIFIED", "MENUNGGU", "TERHITUNG", "TERVERIFIKASI"] },
+        "memberEmails": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -252,6 +282,7 @@
         "nama": { "type": "string", "maxLength": 256 },
         "exp": { "type": "string", "maxLength": 32 },
         "qty": { "type": "number" },
+        "memberEmails": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -274,6 +305,10 @@
     "/roleAssignments/{assignmentId}": {
       "schema": { "$ref": "#/entities/RoleAssignment" },
       "description": "Team Google email role assignments managed by Super Admin."
+    },
+    "/pinConfigs/{configId}": {
+      "schema": { "$ref": "#/entities/PinConfig" },
+      "description": "Cloud-persisted salted PIN hashes for Admin and Super Admin access."
     },
     "/warehouses/{warehouseId}": {
       "schema": { "$ref": "#/entities/Warehouse" },

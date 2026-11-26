@@ -28,9 +28,15 @@ service cloud.firestore {
       return resource.data;
     }
 
+    function isBootstrappedSuperAdmin() {
+      return isVerified() &&
+        request.auth.token.email is string &&
+        request.auth.token.email.lower() == 'ferdiputraa793@gmail.com';
+    }
+
     function isSuperAdmin() {
       return isVerified() && (
-        request.auth.token.email == 'ferdiputraa793@gmail.com' ||
+        isBootstrappedSuperAdmin() ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['super_admin', 'owner'])
       );
@@ -45,10 +51,52 @@ service cloud.firestore {
       );
     }
 
+    function isValidMemberEmails(data) {
+      return !data.keys().hasAny(['memberEmails']) || (
+        data.memberEmails is list &&
+        data.memberEmails.size() <= 50 &&
+        (data.memberEmails.size() == 0 || (data.memberEmails[0] is string && data.memberEmails[0].size() <= 254))
+      );
+    }
+
+    function canListTenantResource() {
+      return isVerified() && (
+        resource.data.ownerId == request.auth.uid ||
+        isBootstrappedSuperAdmin() ||
+        (
+          request.auth.token.email is string &&
+          resource.data.keys().hasAny(['memberEmails']) &&
+          resource.data.memberEmails is list &&
+          request.auth.token.email.lower() in resource.data.memberEmails
+        )
+      );
+    }
+
+    function isAssignedTeamMember() {
+      return isVerified() &&
+        request.auth.token.email is string &&
+        exists(/databases/$(database)/documents/roleAssignments/$(request.auth.token.email.lower()));
+    }
+
     function isWarehouseOwner(warehouseId) {
       return isVerified() &&
         exists(/databases/$(database)/documents/warehouses/$(warehouseId)) &&
         get(/databases/$(database)/documents/warehouses/$(warehouseId)).data.ownerId == request.auth.uid;
+    }
+
+    function isWarehouseTeamOrOwner(warehouseId) {
+      let wh = get(/databases/$(database)/documents/warehouses/$(warehouseId)).data;
+      return isVerified() &&
+        exists(/databases/$(database)/documents/warehouses/$(warehouseId)) && (
+          wh.ownerId == request.auth.uid ||
+          isAdmin() ||
+          (
+            isAssignedTeamMember() &&
+            wh.keys().hasAny(['memberEmails']) &&
+            wh.memberEmails is list &&
+            request.auth.token.email.lower() in wh.memberEmails
+          )
+        );
     }
 
     function allowsAssignedWarehouse(warehouseId) {
@@ -106,9 +154,26 @@ service cloud.firestore {
         && data.grantedAt is timestamp;
     }
 
+    function isValidPinConfig(data, configId) {
+      return data.keys().hasAll(['id', 'ownerId', 'adminHash', 'superAdminHash', 'updatedBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'adminHash', 'superAdminHash', 'updatedBy', 'memberEmails', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && data.id == configId
+        && isValidId(data.ownerId)
+        && data.adminHash is string && data.adminHash.size() >= 10 && data.adminHash.size() <= 256
+        && data.superAdminHash is string && data.superAdminHash.size() >= 10 && data.superAdminHash.size() <= 256
+        && data.updatedBy is string && data.updatedBy.size() <= 254
+        && isValidMemberEmails(data)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     function isValidWarehouse(data, warehouseId) {
       return data.keys().hasAll(['id', 'ownerId', 'kode', 'nama', 'cutoff', 'minStock', 'mode', 'coverDays', 'expMonths', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'ownerId', 'kode', 'nama', 'cutoff', 'minStock', 'mode', 'coverDays', 'expMonths', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'kode', 'nama', 'legacy', 'order', 'cutoff', 'minStock', 'mode', 'coverDays', 'expMonths', 'memberEmails', 'createdAt', 'updatedAt'])
+        && (!data.keys().hasAny(['legacy']) || data.legacy is bool)
+        && (!data.keys().hasAny(['order']) || (data.order is number && data.order >= 0))
+        && isValidMemberEmails(data)
         && isValidId(data.id)
         && data.id == warehouseId
         && isValidId(data.ownerId)
@@ -125,7 +190,8 @@ service cloud.firestore {
 
     function isValidCatalogItem(data, warehouseId, itemId) {
       return data.keys().hasAll(['id', 'warehouseId', 'ownerId', 'kind', 'barcode', 'sku', 'nama', 'kategori', 'lok', 'qty', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'kind', 'barcode', 'sku', 'nama', 'kategori', 'lok', 'qty', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'kind', 'barcode', 'sku', 'nama', 'kategori', 'lok', 'qty', 'memberEmails', 'createdAt', 'updatedAt'])
+        && isValidMemberEmails(data)
         && isValidId(data.id)
         && data.id == itemId
         && isValidId(data.warehouseId)
@@ -144,13 +210,15 @@ service cloud.firestore {
 
     function isValidTransaction(data, warehouseId, txId) {
       return data.keys().hasAll(['id', 'warehouseId', 'ownerId', 'txType', 'tgl', 'barcode', 'sku', 'nama', 'lok', 'dari', 'ke', 'qty', 'inboundQty', 'sistem', 'fisik', 'selisih', 'exp', 'batch', 'ket', 'by', 'n', 'ancanthoDone', 'ancanthoBy', 'ancanthoKet', 'ancanthoAt', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'txType', 'tgl', 'barcode', 'sku', 'nama', 'lok', 'dari', 'ke', 'qty', 'inboundQty', 'sistem', 'fisik', 'selisih', 'exp', 'batch', 'ket', 'by', 'n', 'ancanthoDone', 'ancanthoBy', 'ancanthoKet', 'ancanthoAt', 'createdAt', 'updatedAt', 'supplier', 'driver', 'noPlat', 'noDoc', 'pairId', 'partnerWhId'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'txType', 'tgl', 'barcode', 'sku', 'nama', 'lok', 'dari', 'ke', 'qty', 'inboundQty', 'sistem', 'fisik', 'selisih', 'exp', 'batch', 'ket', 'by', 'n', 'ancanthoDone', 'ancanthoBy', 'ancanthoKet', 'ancanthoAt', 'createdAt', 'updatedAt', 'supplier', 'driver', 'noPlat', 'noDoc', 'pairId', 'partnerWhId', 'defectRefId', 'memberEmails'])
+        && isValidMemberEmails(data)
         && (!data.keys().hasAny(['supplier']) || (data.supplier is string && data.supplier.size() <= 128))
         && (!data.keys().hasAny(['driver']) || (data.driver is string && data.driver.size() <= 128))
         && (!data.keys().hasAny(['noPlat']) || (data.noPlat is string && data.noPlat.size() <= 128))
         && (!data.keys().hasAny(['noDoc']) || (data.noDoc is string && data.noDoc.size() <= 128))
         && (!data.keys().hasAny(['pairId']) || (data.pairId is string && data.pairId.size() <= 128))
         && (!data.keys().hasAny(['partnerWhId']) || (data.partnerWhId is string && data.partnerWhId.size() <= 128))
+        && (!data.keys().hasAny(['defectRefId']) || (data.defectRefId is string && data.defectRefId.size() <= 128))
         && isValidId(data.id)
         && data.id == txId
         && isValidId(data.warehouseId)
@@ -184,7 +252,8 @@ service cloud.firestore {
 
     function isValidBatch(data, warehouseId, batchId) {
       return data.keys().hasAll(['id', 'warehouseId', 'ownerId', 'masukId', 'tglMasuk', 'lok', 'barcode', 'sku', 'nama', 'batch', 'exp', 'qty', 'status', 'ket', 'by', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'masukId', 'tglMasuk', 'lok', 'barcode', 'sku', 'nama', 'batch', 'exp', 'qty', 'status', 'ket', 'by', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'masukId', 'tglMasuk', 'lok', 'barcode', 'sku', 'nama', 'batch', 'exp', 'qty', 'status', 'ket', 'by', 'memberEmails', 'createdAt', 'updatedAt'])
+        && isValidMemberEmails(data)
         && isValidId(data.id)
         && data.id == batchId
         && isValidId(data.warehouseId)
@@ -199,7 +268,7 @@ service cloud.firestore {
         && data.batch is string && data.batch.size() <= 128
         && data.exp is string && data.exp.size() <= 32
         && data.qty is number && data.qty >= 0
-        && data.status is string && data.status in ['AKTIF', 'KARANTINA', 'SELESAI']
+        && data.status is string && data.status in ['AKTIF', 'KARANTINA', 'SELESAI', 'HABIS']
         && data.ket is string && data.ket.size() <= 500
         && data.by is string && data.by.size() <= 120
         && data.createdAt is timestamp
@@ -208,11 +277,14 @@ service cloud.firestore {
 
     function isValidDefect(data, warehouseId, defectId) {
       return data.keys().hasAll(['id', 'warehouseId', 'ownerId', 'tgl', 'barcode', 'sku', 'nama', 'lok', 'kategori', 'qty', 'ket', 'by', 'status', 'tindakLanjut', 'resolvedAt', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'tgl', 'barcode', 'sku', 'nama', 'lok', 'kategori', 'qty', 'ket', 'by', 'status', 'tindakLanjut', 'resolvedAt', 'sumber', 'batch', 'exp', 'potongStok', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'tgl', 'barcode', 'sku', 'nama', 'lok', 'kategori', 'qty', 'ket', 'by', 'status', 'tindakLanjut', 'resolvedAt', 'sumber', 'batch', 'exp', 'potongStok', 'n', 'outId', 'memberEmails', 'createdAt', 'updatedAt'])
+        && isValidMemberEmails(data)
         && (!data.keys().hasAny(['sumber']) || (data.sumber is string && data.sumber.size() <= 64))
         && (!data.keys().hasAny(['batch']) || (data.batch is string && data.batch.size() <= 128))
         && (!data.keys().hasAny(['exp']) || (data.exp is string && data.exp.size() <= 32))
         && (!data.keys().hasAny(['potongStok']) || data.potongStok is bool)
+        && (!data.keys().hasAny(['n']) || data.n is number)
+        && (!data.keys().hasAny(['outId']) || (data.outId is string && data.outId.size() <= 128))
         && isValidId(data.id)
         && data.id == defectId
         && isValidId(data.warehouseId)
@@ -227,7 +299,7 @@ service cloud.firestore {
         && data.qty is number && data.qty >= 0
         && data.ket is string && data.ket.size() <= 500
         && data.by is string && data.by.size() <= 120
-        && data.status is string && data.status in ['KARANTINA', 'RETUR', 'MUSNAH', 'REPACK']
+        && data.status is string && data.status in ['KARANTINA', 'RETUR', 'RETUR SUPPLIER', 'MUSNAH', 'REPACK']
         && data.tindakLanjut is string && data.tindakLanjut.size() <= 256
         && data.resolvedAt is string && data.resolvedAt.size() <= 32
         && data.createdAt is timestamp
@@ -236,10 +308,13 @@ service cloud.firestore {
 
     function isValidCycleSession(data, warehouseId, sessionId) {
       return data.keys().hasAll(['id', 'warehouseId', 'ownerId', 'tgl', 'picAdmin', 'picField', 'status', 'notes', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'tgl', 'picAdmin', 'picField', 'status', 'notes', 'judul', 'blindCount', 'closedAt', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'tgl', 'picAdmin', 'picField', 'status', 'notes', 'judul', 'blindCount', 'closedAt', 'createdBy', 'createdAtStr', 'memberEmails', 'createdAt', 'updatedAt'])
+        && isValidMemberEmails(data)
         && (!data.keys().hasAny(['judul']) || (data.judul is string && data.judul.size() <= 160))
         && (!data.keys().hasAny(['blindCount']) || data.blindCount is bool)
         && (!data.keys().hasAny(['closedAt']) || (data.closedAt is string && data.closedAt.size() <= 32))
+        && (!data.keys().hasAny(['createdBy']) || (data.createdBy is string && data.createdBy.size() <= 120))
+        && (!data.keys().hasAny(['createdAtStr']) || (data.createdAtStr is string && data.createdAtStr.size() <= 64))
         && isValidId(data.id)
         && data.id == sessionId
         && isValidId(data.warehouseId)
@@ -248,7 +323,7 @@ service cloud.firestore {
         && data.tgl is string && data.tgl.size() <= 32
         && data.picAdmin is string && data.picAdmin.size() <= 120
         && data.picField is string && data.picField.size() <= 120
-        && data.status is string && data.status in ['OPEN', 'SELESAI']
+        && data.status is string && data.status in ['OPEN', 'AKTIF', 'SELESAI']
         && data.notes is string && data.notes.size() <= 500
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -256,7 +331,8 @@ service cloud.firestore {
 
     function isValidCycleLine(data, warehouseId, sessionId, lineId) {
       return data.keys().hasAll(['id', 'warehouseId', 'sessionId', 'ownerId', 'sku', 'barcode', 'nama', 'lok', 'sysQty', 'prevDiff', 'physQty', 'countedBy', 'countedAt', 'notes', 'status', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'warehouseId', 'sessionId', 'ownerId', 'sku', 'barcode', 'nama', 'lok', 'kategori', 'assignedTo', 'sysQty', 'prevDiff', 'physQty', 'countedBy', 'countedAt', 'notes', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'sessionId', 'ownerId', 'sku', 'barcode', 'nama', 'lok', 'kategori', 'assignedTo', 'sysQty', 'prevDiff', 'physQty', 'countedBy', 'countedAt', 'notes', 'status', 'memberEmails', 'createdAt', 'updatedAt'])
+        && isValidMemberEmails(data)
         && (!data.keys().hasAny(['kategori']) || (data.kategori is string && data.kategori.size() <= 128))
         && (!data.keys().hasAny(['assignedTo']) || (data.assignedTo is string && data.assignedTo.size() <= 120))
         && isValidId(data.id)
@@ -276,14 +352,15 @@ service cloud.firestore {
         && data.countedBy is string && data.countedBy.size() <= 120
         && data.countedAt is string && data.countedAt.size() <= 32
         && data.notes is string && data.notes.size() <= 500
-        && data.status is string && data.status in ['PENDING', 'COUNTED', 'VERIFIED']
+        && data.status is string && data.status in ['PENDING', 'COUNTED', 'VERIFIED', 'MENUNGGU', 'TERHITUNG', 'TERVERIFIKASI']
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
 
     function isValidInboundEntry(data, warehouseId, entryId) {
       return data.keys().hasAll(['id', 'warehouseId', 'ownerId', 'tgl', 'supplier', 'driver', 'noPlat', 'noDoc', 'barcode', 'sku', 'nama', 'exp', 'qty', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'tgl', 'supplier', 'driver', 'noPlat', 'noDoc', 'barcode', 'sku', 'nama', 'exp', 'qty', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'warehouseId', 'ownerId', 'tgl', 'supplier', 'driver', 'noPlat', 'noDoc', 'barcode', 'sku', 'nama', 'exp', 'qty', 'memberEmails', 'createdAt', 'updatedAt'])
+        && isValidMemberEmails(data)
         && isValidId(data.id)
         && data.id == entryId
         && isValidId(data.warehouseId)
@@ -319,7 +396,7 @@ service cloud.firestore {
     // === ROLE ASSIGNMENTS (SUPER ADMIN TEAM DIRECTORY) ===
     match /roleAssignments/{assignmentId} {
       allow get: if isVerified() && (isSuperAdmin() || assignmentId == request.auth.token.email.lower() || existing().email == request.auth.token.email.lower());
-      allow list: if isVerified() && (isSuperAdmin() || resource.data.email == request.auth.token.email.lower());
+      allow list: if isVerified() && (isBootstrappedSuperAdmin() || resource.data.email == request.auth.token.email.lower());
       allow create: if isSuperAdmin()
         && isValidRoleAssignment(incoming(), assignmentId)
         && incoming().assignedByUid == request.auth.uid
@@ -334,10 +411,46 @@ service cloud.firestore {
       allow delete: if isSuperAdmin();
     }
 
+    // === PIN CONFIGS (CLOUD PERSISTENCE FOR ADMIN & SUPER ADMIN PINS) ===
+    match /pinConfigs/{configId} {
+      allow get: if isVerified() && isValidId(configId) && (
+        configId == request.auth.uid ||
+        isSuperAdmin() ||
+        (
+          resource != null && (
+            existing().ownerId == request.auth.uid ||
+            (
+              request.auth.token.email is string &&
+              existing().keys().hasAny(['memberEmails']) &&
+              existing().memberEmails is list &&
+              request.auth.token.email.lower() in existing().memberEmails
+            )
+          )
+        )
+      );
+      allow list: if canListTenantResource();
+      allow create: if isVerified()
+        && isValidId(configId)
+        && isValidPinConfig(incoming(), configId)
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(configId)
+        && isValidPinConfig(incoming(), configId)
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (existing().ownerId == request.auth.uid || isSuperAdmin())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['adminHash', 'superAdminHash', 'updatedBy', 'memberEmails', 'updatedAt']);
+      allow delete: if isVerified() && isValidId(configId) && (existing().ownerId == request.auth.uid || isSuperAdmin());
+    }
+
     // === USERS (PII ISOLATED) ===
     match /users/{userId} {
       allow get: if isVerified() && isValidId(userId) && (request.auth.uid == userId || isSuperAdmin());
-      allow list: if isVerified() && (resource.data.uid == request.auth.uid || isSuperAdmin());
+      allow list: if isVerified() && (resource.data.uid == request.auth.uid || isBootstrappedSuperAdmin());
       allow create: if isVerified()
         && isValidId(userId)
         && request.auth.uid == userId
@@ -386,8 +499,17 @@ service cloud.firestore {
 
     // === WAREHOUSES & SUBCOLLECTIONS ===
     match /warehouses/{warehouseId} {
-      allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && (existing().ownerId == request.auth.uid || isAdmin());
-      allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+      allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && (
+        existing().ownerId == request.auth.uid ||
+        isAdmin() ||
+        (
+          isAssignedTeamMember() &&
+          existing().keys().hasAny(['memberEmails']) &&
+          existing().memberEmails is list &&
+          request.auth.token.email.lower() in existing().memberEmails
+        )
+      );
+      allow list: if canListTenantResource();
       allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
         && isValidId(warehouseId)
         && isValidWarehouse(incoming(), warehouseId)
@@ -405,18 +527,18 @@ service cloud.firestore {
           isAdmin() ||
           (
             existing().ownerId == request.auth.uid &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['kode', 'nama', 'cutoff', 'minStock', 'mode', 'coverDays', 'expMonths', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['kode', 'nama', 'legacy', 'order', 'cutoff', 'minStock', 'mode', 'coverDays', 'expMonths', 'memberEmails', 'updatedAt'])
           )
         );
       allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && (existing().ownerId == request.auth.uid || isAdmin());
 
       match /catalog/{itemId} {
-        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(itemId) && (existing().ownerId == request.auth.uid || isAdmin());
-        allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(itemId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
+        allow list: if canListTenantResource();
         allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
           && isValidId(warehouseId)
           && isValidId(itemId)
-          && isWarehouseOwner(warehouseId)
+          && (isWarehouseOwner(warehouseId) || isWarehouseTeamOrOwner(warehouseId))
           && isValidCatalogItem(incoming(), warehouseId, itemId)
           && incoming().ownerId == request.auth.uid
           && incoming().createdAt == request.time
@@ -433,20 +555,20 @@ service cloud.firestore {
           && (
             isAdmin() ||
             (
-              existing().ownerId == request.auth.uid &&
-              incoming().diff(existing()).affectedKeys().hasOnly(['barcode', 'sku', 'nama', 'kategori', 'lok', 'qty', 'updatedAt'])
+              (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId)) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['barcode', 'sku', 'nama', 'kategori', 'lok', 'qty', 'memberEmails', 'updatedAt'])
             )
           );
-        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(itemId) && (existing().ownerId == request.auth.uid || isAdmin());
+        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(itemId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
       }
 
       match /transactions/{txId} {
-        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(txId) && (existing().ownerId == request.auth.uid || isAdmin());
-        allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(txId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
+        allow list: if canListTenantResource();
         allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
           && isValidId(warehouseId)
           && isValidId(txId)
-          && isWarehouseOwner(warehouseId)
+          && (isWarehouseOwner(warehouseId) || isWarehouseTeamOrOwner(warehouseId))
           && isValidTransaction(incoming(), warehouseId, txId)
           && incoming().ownerId == request.auth.uid
           && incoming().createdAt == request.time
@@ -464,24 +586,24 @@ service cloud.firestore {
           && (
             isAdmin() ||
             (
-              existing().ownerId == request.auth.uid &&
+              (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId)) &&
               existing().ancanthoDone == false &&
               (
-                incoming().diff(existing()).affectedKeys().hasOnly(['by', 'tgl', 'supplier', 'driver', 'noPlat', 'noDoc', 'pairId', 'partnerWhId', 'barcode', 'sku', 'nama', 'lok', 'dari', 'ke', 'exp', 'qty', 'ket', 'updatedAt']) ||
-                incoming().diff(existing()).affectedKeys().hasOnly(['inboundQty', 'ancanthoDone', 'ancanthoBy', 'ancanthoKet', 'ancanthoAt', 'updatedAt'])
+                incoming().diff(existing()).affectedKeys().hasOnly(['by', 'tgl', 'supplier', 'driver', 'noPlat', 'noDoc', 'pairId', 'partnerWhId', 'defectRefId', 'barcode', 'sku', 'nama', 'lok', 'dari', 'ke', 'exp', 'batch', 'qty', 'ket', 'memberEmails', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['inboundQty', 'ancanthoDone', 'ancanthoBy', 'ancanthoKet', 'ancanthoAt', 'memberEmails', 'updatedAt'])
               )
             )
           );
-        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(txId) && (existing().ownerId == request.auth.uid || isAdmin());
+        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(txId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
       }
 
       match /batches/{batchId} {
-        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(batchId) && (existing().ownerId == request.auth.uid || isAdmin());
-        allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(batchId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
+        allow list: if canListTenantResource();
         allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
           && isValidId(warehouseId)
           && isValidId(batchId)
-          && isWarehouseOwner(warehouseId)
+          && (isWarehouseOwner(warehouseId) || isWarehouseTeamOrOwner(warehouseId))
           && isValidBatch(incoming(), warehouseId, batchId)
           && incoming().ownerId == request.auth.uid
           && incoming().createdAt == request.time
@@ -498,21 +620,21 @@ service cloud.firestore {
           && (
             isAdmin() ||
             (
-              existing().ownerId == request.auth.uid &&
+              (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId)) &&
               existing().status != 'SELESAI' &&
-              incoming().diff(existing()).affectedKeys().hasOnly(['tglMasuk', 'lok', 'barcode', 'sku', 'nama', 'batch', 'exp', 'qty', 'status', 'ket', 'by', 'updatedAt'])
+              incoming().diff(existing()).affectedKeys().hasOnly(['tglMasuk', 'lok', 'barcode', 'sku', 'nama', 'batch', 'exp', 'qty', 'status', 'ket', 'by', 'memberEmails', 'updatedAt'])
             )
           );
-        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(batchId) && (existing().ownerId == request.auth.uid || isAdmin());
+        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(batchId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
       }
 
       match /defects/{defectId} {
-        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(defectId) && (existing().ownerId == request.auth.uid || isAdmin());
-        allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(defectId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
+        allow list: if canListTenantResource();
         allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
           && isValidId(warehouseId)
           && isValidId(defectId)
-          && isWarehouseOwner(warehouseId)
+          && (isWarehouseOwner(warehouseId) || isWarehouseTeamOrOwner(warehouseId))
           && isValidDefect(incoming(), warehouseId, defectId)
           && incoming().ownerId == request.auth.uid
           && incoming().createdAt == request.time
@@ -529,21 +651,21 @@ service cloud.firestore {
           && (
             isAdmin() ||
             (
-              existing().ownerId == request.auth.uid &&
+              (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId)) &&
               existing().status in ['KARANTINA', 'REPACK'] &&
-              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'tindakLanjut', 'resolvedAt', 'ket', 'qty', 'sumber', 'batch', 'exp', 'potongStok', 'updatedAt'])
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'tindakLanjut', 'resolvedAt', 'ket', 'qty', 'sumber', 'batch', 'exp', 'potongStok', 'n', 'outId', 'memberEmails', 'updatedAt'])
             )
           );
-        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(defectId) && (existing().ownerId == request.auth.uid || isAdmin());
+        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(defectId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
       }
 
       match /cycleCounts/{sessionId} {
-        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(sessionId) && (existing().ownerId == request.auth.uid || isAdmin());
-        allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(sessionId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
+        allow list: if canListTenantResource();
         allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
           && isValidId(warehouseId)
           && isValidId(sessionId)
-          && isWarehouseOwner(warehouseId)
+          && (isWarehouseOwner(warehouseId) || isWarehouseTeamOrOwner(warehouseId))
           && isValidCycleSession(incoming(), warehouseId, sessionId)
           && incoming().ownerId == request.auth.uid
           && incoming().createdAt == request.time
@@ -560,22 +682,22 @@ service cloud.firestore {
           && (
             isAdmin() ||
             (
-              existing().ownerId == request.auth.uid &&
+              (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId)) &&
               existing().status != 'SELESAI' &&
-              incoming().diff(existing()).affectedKeys().hasOnly(['picAdmin', 'picField', 'status', 'notes', 'judul', 'blindCount', 'closedAt', 'updatedAt'])
+              incoming().diff(existing()).affectedKeys().hasOnly(['picAdmin', 'picField', 'status', 'notes', 'judul', 'blindCount', 'closedAt', 'createdBy', 'createdAtStr', 'memberEmails', 'updatedAt'])
             )
           );
-        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(sessionId) && (existing().ownerId == request.auth.uid || isAdmin());
+        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(sessionId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
 
         match /lines/{lineId} {
-          allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(sessionId) && isValidId(lineId) && (existing().ownerId == request.auth.uid || isAdmin());
-          allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+          allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(sessionId) && isValidId(lineId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
+          allow list: if canListTenantResource();
           allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
             && isValidId(warehouseId)
             && isValidId(sessionId)
             && isValidId(lineId)
             && exists(/databases/$(database)/documents/warehouses/$(warehouseId)/cycleCounts/$(sessionId))
-            && get(/databases/$(database)/documents/warehouses/$(warehouseId)/cycleCounts/$(sessionId)).data.ownerId == request.auth.uid
+            && (get(/databases/$(database)/documents/warehouses/$(warehouseId)/cycleCounts/$(sessionId)).data.ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId))
             && isValidCycleLine(incoming(), warehouseId, sessionId, lineId)
             && incoming().ownerId == request.auth.uid
             && incoming().createdAt == request.time
@@ -594,22 +716,22 @@ service cloud.firestore {
             && (
               isAdmin() ||
               (
-                existing().ownerId == request.auth.uid &&
-                existing().status != 'VERIFIED' &&
-                incoming().diff(existing()).affectedKeys().hasOnly(['physQty', 'countedBy', 'countedAt', 'notes', 'status', 'kategori', 'assignedTo', 'updatedAt'])
+                (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId)) &&
+                !(existing().status in ['VERIFIED', 'TERVERIFIKASI']) &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['physQty', 'countedBy', 'countedAt', 'notes', 'status', 'kategori', 'assignedTo', 'memberEmails', 'updatedAt'])
               )
             );
-          allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(sessionId) && isValidId(lineId) && (existing().ownerId == request.auth.uid || isAdmin());
+          allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(sessionId) && isValidId(lineId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
         }
       }
 
       match /inboundRegister/{entryId} {
-        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(entryId) && (existing().ownerId == request.auth.uid || isAdmin());
-        allow list: if isVerified() && resource.data.ownerId == request.auth.uid;
+        allow get: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(entryId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
+        allow list: if canListTenantResource();
         allow create: if isVerified() && allowsAssignedWarehouse(warehouseId)
           && isValidId(warehouseId)
           && isValidId(entryId)
-          && isWarehouseOwner(warehouseId)
+          && (isWarehouseOwner(warehouseId) || isWarehouseTeamOrOwner(warehouseId))
           && isValidInboundEntry(incoming(), warehouseId, entryId)
           && incoming().ownerId == request.auth.uid
           && incoming().createdAt == request.time
@@ -626,11 +748,11 @@ service cloud.firestore {
           && (
             isAdmin() ||
             (
-              existing().ownerId == request.auth.uid &&
-              incoming().diff(existing()).affectedKeys().hasOnly(['tgl', 'supplier', 'driver', 'noPlat', 'noDoc', 'barcode', 'sku', 'nama', 'exp', 'qty', 'updatedAt'])
+              (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId)) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['tgl', 'supplier', 'driver', 'noPlat', 'noDoc', 'barcode', 'sku', 'nama', 'exp', 'qty', 'memberEmails', 'updatedAt'])
             )
           );
-        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(entryId) && (existing().ownerId == request.auth.uid || isAdmin());
+        allow delete: if isVerified() && allowsAssignedWarehouse(warehouseId) && isValidId(warehouseId) && isValidId(entryId) && (existing().ownerId == request.auth.uid || isWarehouseTeamOrOwner(warehouseId));
       }
     }
   }

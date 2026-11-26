@@ -1,5 +1,5 @@
 import { getMasukInboundMatch, isMasukAncanthoDone } from '../core/cycleCountEngine.ts';
-import { buildSampleData } from '../core/seedData.ts';
+import { buildSampleData, isLocalDevEnvironment } from '../core/seedData.ts';
 import { computeWarehouseAnalysis, findMasterByBarcode, findMasterBySku } from '../core/stockEngine.ts';
 import { curData, getWhMeta, whPrefix, writeWarehouseData } from '../core/warehouseRegistry.ts';
 import { openCameraScanner, playBeep } from '../services/scannerService.ts';
@@ -46,19 +46,23 @@ export function renderDashboard(root, d, an) {
   }
 
   if (!hasData) {
+    var canSeedDev = isLocalDevEnvironment();
     html += '<div class="empty-state">' +
       '<h3>Gudang Ini Belum Memiliki Data</h3>' +
-      '<p>Mulai dengan mengimpor file spreadsheet .xlsx dari Google Sheets Anda, atau muat data contoh Scarlett GP1 untuk langsung menguji alur Masuk, Inbound, Keluar, dan Perpindahan.</p>' +
+      '<p>Mulai dengan mengimpor file spreadsheet .xlsx dari Google Sheets Anda' + (canSeedDev ? ', atau muat data contoh (mode development) untuk pengujian lokal.' : ' atau catat transaksi Barang Masuk dan Master Barang.') + '</p>' +
       '<div class="empty-actions">' +
-      '<button type="button" class="btn btn-primary" id="btn-empty-sample">Muat Data Contoh</button>' +
-      (getEffectiveRole() === 'super_admin' ? '<button type="button" class="btn" id="btn-empty-import">Buka Master &amp; Impor</button>' : '') +
+      (canSeedDev ? '<button type="button" class="btn btn-primary" id="btn-empty-sample">Muat Data Contoh (Dev)</button>' : '') +
+      (getEffectiveRole() === 'super_admin' ? '<button type="button" class="btn' + (canSeedDev ? '' : ' btn-primary') + '" id="btn-empty-import">Buka Master &amp; Impor</button>' : '') +
       '</div></div>';
     root.innerHTML = html;
-    byId('btn-empty-sample').addEventListener('click', function () {
-      writeWarehouseData(appState.W.cur, buildSampleData());
-      showToast('Data contoh berhasil dimuat ke ' + getWhMeta(appState.W.cur).nama, 'ok');
-      renderApp();
-    });
+    var sampleBtn = byId('btn-empty-sample');
+    if (sampleBtn && canSeedDev) {
+      sampleBtn.addEventListener('click', function () {
+        writeWarehouseData(appState.W.cur, buildSampleData());
+        showToast('Data contoh berhasil dimuat ke ' + getWhMeta(appState.W.cur).nama, 'ok');
+        renderApp();
+      });
+    }
     var emptyImpBtn = byId('btn-empty-import');
     if (emptyImpBtn) {
       emptyImpBtn.addEventListener('click', function () {

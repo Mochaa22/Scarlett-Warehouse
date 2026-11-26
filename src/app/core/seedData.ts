@@ -1,7 +1,18 @@
 import { addDaysISO, addMonthsISO, todayISO, uid } from '../utils/format.ts';
 
-// === DATA CONTOH ===
+// === GUARD SEEDER: HANYA AKTIF DI MODE DEVELOPMENT (LOCALHOST) ===
+export function isLocalDevEnvironment(): boolean {
+  const isDev = Boolean((import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV);
+  if (!isDev || typeof window === 'undefined') return false;
+  const host = String(window.location.hostname || '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+}
+
+// === DATA CONTOH (DEV ONLY) ===
 export function buildSampleData() {
+  if (!isLocalDevEnvironment()) {
+    throw new Error('Fungsi pengisian data contoh (seeder) dinonaktifkan di mode production.');
+  }
   var today = todayISO();
   var cut = addDaysISO(today, -20);
   var master = [

@@ -360,9 +360,30 @@ export function scheduleSharedSyncRetry() {
   }, delay);
 }
 
-export async function pushSharedWarehouseState() {
+function refreshRealtimeSubscription() {
+  var cloud = window.__sgpCloud;
+  if (!cloud || !cloud.warehouse || !cloud.warehouse.subscribeRealtime) return;
+  if (!appState.appAuthStatusCache.authenticated) return;
+  var ids = (appState.W && Array.isArray(appState.W.list) ? appState.W.list : []).map(function (w) {
+    return w.id;
+  });
+  cloud.warehouse.subscribeRealtime(ids, function () {
+    if (!appState.appAuthStatusCache.authenticated) return;
+    if (!appState.sharedSyncState.pending && !appState.sharedSyncState.inFlight) {
+      void pullSharedWarehouseState('realtime');
+    }
+  });
+}
+
+export async function pushSharedWarehouseState(forceInitialPush?: boolean) {
   var cloud = await waitForCloudBridge(2000);
   if (!appState.appAuthStatusCache.authenticated || !cloud || !cloud.warehouse) return;
+  if (!appState.sharedSyncState.initialCloudLoaded && !forceInitialPush) {
+    var candidateSnap = buildSharedSnapshotFromLocal();
+    if (isSharedSnapshotEmpty(candidateSnap)) {
+      return;
+    }
+  }
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     appState.sharedSyncState.pending = true;
     appState.sharedSyncState.dirty = true;
@@ -394,46 +415,26 @@ export async function pushSharedWarehouseState() {
       appState.appAuthToken || null
     );
 
-    if (res && res.conflict && res.latest) {
-      var merged = mergeSnapshots3Way(appState.sharedSyncState.snapshot, localSnap, res.latest);
-      applySharedStateLocally({
-        revision: res.latest.revision,
-        warehousesMeta: merged.warehousesMeta,
-        warehouses: merged.warehouses
-      });
-      var retryRes = await window.__sgpCloud.warehouse.saveState(
-        {
-          baseRevision: res.latest.revision,
-          warehousesMeta: merged.warehousesMeta,
-          warehouses: merged.warehouses
-        },
-        appState.appAuthToken || null
-      );
-      if (retryRes && retryRes.ok) {
-        appState.sharedSyncState.revision = Number(retryRes.revision || 0);
-        appState.sharedSyncState.snapshot = cloneJsonSafe(buildSharedSnapshotFromLocal());
-        appState.sharedSyncState.pending = false;
-        appState.sharedSyncState.retryDelayMs = 2000;
-        appState.sharedSyncState.offlineNotified = false;
-        if (retryRes.storageMode) appState.sharedSyncState.storageMode = retryRes.storageMode;
-        saveSyncPersistence(true);
-      }
-      triggerRenderOrDefer();
-    } else if (res && res.ok) {
+    if (res && res.ok) {
       appState.sharedSyncState.revision = Number(res.revision || 0);
       appState.sharedSyncState.snapshot = cloneJsonSafe(localSnap);
+      appState.sharedSyncState.lastSyncedSnapshot = appState.sharedSyncState.snapshot;
       appState.sharedSyncState.pending = false;
       appState.sharedSyncState.retryDelayMs = 2000;
+      appState.sharedSyncState.lastError = '';
       if (res.storageMode) appState.sharedSyncState.storageMode = res.storageMode;
       saveSyncPersistence(true);
+      refreshRealtimeSubscription();
       if (appState.sharedSyncState.offlineNotified && hadPendingBefore) {
         appState.sharedSyncState.offlineNotified = false;
-        showToast('Koneksi kembali stabil — seluruh perubahan tertunda berhasil disinkronkan.', 'ok');
+        showToast('Koneksi kembali stabil — seluruh perubahan tertunda berhasil tersimpan ke Firebase.', 'ok');
       } else {
         appState.sharedSyncState.offlineNotified = false;
       }
     }
   } catch (err) {
+    var msg = (err && err.message) || 'Gagal menyinkronkan ke Firebase';
+    appState.sharedSyncState.lastError = msg;
     if (err && err.status === 401) {
       appState.sharedSyncState.pending = true;
       appState.sharedSyncState.dirty = false;
@@ -446,7 +447,7 @@ export async function pushSharedWarehouseState() {
       scheduleSharedSyncRetry();
       if (!appState.sharedSyncState.offlineNotified) {
         appState.sharedSyncState.offlineNotified = true;
-        showToast('Koneksi tidak stabil — data aman tersimpan di perangkat, sinkronisasi ulang otomatis berjalan.', 'warn');
+        showToast('Sinkronisasi Firebase tertunda — data tetap aman dan akan dikirim ulang otomatis.', 'warn');
       }
     }
   } finally {
@@ -468,11 +469,11 @@ export async function pullSharedWarehouseState(isInitialOrManual?: boolean | str
     }
     return;
   }
-  if (appState.sharedSyncState.pending) {
+  if (appState.sharedSyncState.pending && appState.sharedSyncState.initialCloudLoaded) {
     if (isInitialOrManual === 'manual') {
       await pushSharedWarehouseState();
       if (!appState.sharedSyncState.pending) {
-        showToast('Perubahan tertunda berhasil disinkronkan ke server', 'ok');
+        showToast('Perubahan tertunda berhasil disimpan ke Firebase', 'ok');
       }
     } else if (!appState.sharedSyncState.inFlight && !appState.sharedSyncState.pushTimer && !appState.sharedSyncState.retryTimer) {
       void pushSharedWarehouseState();
@@ -487,38 +488,68 @@ export async function pullSharedWarehouseState(isInitialOrManual?: boolean | str
     if (res && res.storageMode) {
       appState.sharedSyncState.storageMode = res.storageMode;
     }
+    appState.sharedSyncState.initialCloudLoaded = true;
     if (!res) return;
 
-    if (Number(res.revision || 0) === 0) {
+    var hasRemoteWarehouses = Array.isArray(res.warehousesMeta) && res.warehousesMeta.length > 0;
+    if (!hasRemoteWarehouses) {
       var localSnap = buildSharedSnapshotFromLocal();
       if (!isSharedSnapshotEmpty(localSnap)) {
         appState.sharedSyncState.inFlight = false;
-        await pushSharedWarehouseState();
+        await pushSharedWarehouseState(true);
         return;
       }
-      appState.sharedSyncState.revision = 0;
+      appState.sharedSyncState.revision = Number(res.revision || 0);
       appState.sharedSyncState.snapshot = cloneJsonSafe(localSnap);
+      appState.sharedSyncState.lastSyncedSnapshot = appState.sharedSyncState.snapshot;
       saveSyncPersistence(true);
+      refreshRealtimeSubscription();
+      if (isInitialOrManual === 'manual') {
+        showToast('Terhubung ke Firebase Firestore (database masih kosong)', 'info');
+      }
       return;
     }
 
-    if (res.changed && Number(res.revision || 0) !== appState.sharedSyncState.revision) {
-      var wasInitialized = appState.sharedSyncState.revision > 0;
+    var localBefore = buildSharedSnapshotFromLocal();
+    var remoteComparable = {
+      warehousesMeta: (res.warehousesMeta || []).map(function (w) {
+        return { id: w.id, nama: w.nama, legacy: Boolean(w.legacy) };
+      }),
+      warehouses: res.warehouses || {}
+    };
+    var localComparable = {
+      warehousesMeta: localBefore.warehousesMeta,
+      warehouses: localBefore.warehouses
+    };
+    var isDifferent = JSON.stringify(localComparable) !== JSON.stringify(remoteComparable);
+
+    if (isDifferent) {
+      var wasLoadedBefore = appState.sharedSyncState.revision > 0 && !isSharedSnapshotEmpty(localBefore);
       applySharedStateLocally(res);
+      appState.sharedSyncState.lastSyncedSnapshot = appState.sharedSyncState.snapshot;
       triggerRenderOrDefer();
-      if (wasInitialized && res.updatedBy && res.updatedBy !== appState.appAuthEmail) {
-        showToast('Data diperbarui oleh ' + res.updatedBy, 'info');
+      refreshRealtimeSubscription();
+      if (wasLoadedBefore && isInitialOrManual !== true) {
+        showToast('Data terbaru disinkronkan dari Firebase', 'info');
       } else if (isInitialOrManual === 'manual') {
-        showToast('Data terbaru berhasil disinkronkan', 'ok');
+        showToast('Data terbaru berhasil dimuat dari Firebase', 'ok');
       }
-    } else if (isInitialOrManual === 'manual') {
-      showToast('Data sudah versi terbaru', 'ok');
+    } else {
+      appState.sharedSyncState.revision = Number(res.revision || appState.sharedSyncState.revision || 1);
+      appState.sharedSyncState.snapshot = cloneJsonSafe(localBefore);
+      appState.sharedSyncState.lastSyncedSnapshot = appState.sharedSyncState.snapshot;
+      saveSyncPersistence(true);
+      refreshRealtimeSubscription();
+      if (isInitialOrManual === 'manual') {
+        showToast('Data sudah sinkron dengan Firebase', 'ok');
+      }
     }
   } catch (err) {
+    appState.sharedSyncState.lastError = (err && err.message) || '';
     if (err && err.status === 401) {
       void syncAppAuthStatus(true);
     } else if (isInitialOrManual === 'manual') {
-      showToast((err && err.message) || 'Koneksi tidak stabil, data lokal tetap aman', 'warn');
+      showToast((err && err.message) || 'Koneksi Firebase tidak stabil, data lokal tetap aman', 'warn');
     }
   } finally {
     appState.sharedSyncState.inFlight = false;
@@ -553,11 +584,9 @@ export function startSharedSyncLoop() {
       if (!appState.sharedSyncState.inFlight && !appState.sharedSyncState.pushTimer && !appState.sharedSyncState.retryTimer) {
         void pushSharedWarehouseState();
       }
-      return;
     }
-    void pullSharedWarehouseState(false);
-  }, 3000);
-  if (appState.sharedSyncState.pending) {
+  }, 15000);
+  if (appState.sharedSyncState.pending && appState.sharedSyncState.initialCloudLoaded) {
     void pushSharedWarehouseState();
   } else {
     void pullSharedWarehouseState(true);
@@ -565,6 +594,9 @@ export function startSharedSyncLoop() {
 }
 
 export function stopSharedSyncLoop(resetState?: boolean) {
+  if (window.__sgpCloud && window.__sgpCloud.warehouse && window.__sgpCloud.warehouse.stopRealtime) {
+    window.__sgpCloud.warehouse.stopRealtime();
+  }
   if (appState.sharedSyncState.pollTimer) {
     clearInterval(appState.sharedSyncState.pollTimer);
     appState.sharedSyncState.pollTimer = null;
@@ -580,11 +612,13 @@ export function stopSharedSyncLoop(resetState?: boolean) {
   if (resetState) {
     appState.sharedSyncState.revision = 0;
     appState.sharedSyncState.snapshot = null;
+    appState.sharedSyncState.lastSyncedSnapshot = null;
     appState.sharedSyncState.dirty = false;
     appState.sharedSyncState.pending = false;
     appState.sharedSyncState.pendingRender = false;
     appState.sharedSyncState.retryDelayMs = 2000;
     appState.sharedSyncState.offlineNotified = false;
+    appState.sharedSyncState.initialCloudLoaded = false;
     safeDel(SYNC_META_KEY);
     safeDel(SYNC_BASE_KEY);
     updateSyncButtonUI();

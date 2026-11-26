@@ -62,6 +62,7 @@ export interface SharedSyncState {
   lastSyncedSnapshot: any;
   pendingRender: boolean;
   lastEditNoticeAt: number;
+  initialCloudLoaded?: boolean;
 }
 
 export interface AuthStatusCache {
