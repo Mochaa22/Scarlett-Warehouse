@@ -25,23 +25,15 @@ export function persistAppAuthToken(tok?: string | null, rememberOpt?: boolean) 
     appState.appAuthRememberDevice = rememberOpt;
     safeSetRaw(AUTH_REMEMBER_KEY, rememberOpt ? '1' : '0');
   }
-  if (!appState.appAuthToken) {
-    safeDel(AUTH_TOKEN_KEY);
-    sessionSetRaw(AUTH_SESSION_TOKEN_KEY, '');
-  } else if (appState.appAuthRememberDevice) {
-    safeSetRaw(AUTH_TOKEN_KEY, appState.appAuthToken);
-    sessionSetRaw(AUTH_SESSION_TOKEN_KEY, '');
-  } else {
-    sessionSetRaw(AUTH_SESSION_TOKEN_KEY, appState.appAuthToken);
-    safeDel(AUTH_TOKEN_KEY);
-  }
+  safeDel(AUTH_TOKEN_KEY);
+  sessionSetRaw(AUTH_SESSION_TOKEN_KEY, '');
 }
 
 export function persistPinSession(tok?: string | null, role?: string | null) {
   appState.pinSessionToken = String(tok || '').trim();
   appState.pinSessionRole = (role === 'admin' || role === 'super_admin') ? role : null;
-  sessionSetRaw(PIN_TOKEN_KEY, appState.pinSessionToken);
-  sessionSetRaw(PIN_ROLE_KEY, appState.pinSessionRole || '');
+  sessionSetRaw(PIN_TOKEN_KEY, '');
+  sessionSetRaw(PIN_ROLE_KEY, '');
 }
 
 export function normalizeAppRole(r) {
@@ -211,7 +203,9 @@ export async function openRoleModal(preselectTarget?: string) {
 
   function renderModalBody() {
     var html = '<p class="muted" style="margin-top:0;font-size:13px">' +
-      (appState.appAuthEmail ? 'Akun: <strong>' + esc(appState.appAuthEmail) + '</strong> · ' : '') +
+      (appState.appAuthEmail
+        ? 'Akun: <strong>' + esc(appState.appAuthEmail) + '</strong> · '
+        : '') +
       'Role aktif: <strong>' + esc(ROLE_LABELS[effectiveRole]) + '</strong>. Untuk masuk ke mode Admin atau Super Admin, masukkan PIN terlebih dahulu.</p>';
 
     var cards = [

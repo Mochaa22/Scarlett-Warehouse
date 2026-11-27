@@ -490,7 +490,15 @@ export async function pullSharedWarehouseState(isInitialOrManual?: boolean | str
     }
     appState.sharedSyncState.initialCloudLoaded = true;
     if (!res) return;
+    if (res.changed === false) {
+      appState.sharedSyncState.revision = Number(res.revision || appState.sharedSyncState.revision || 0);
+      if (isInitialOrManual === 'manual') {
+        showToast('Data sudah sinkron dengan server', 'ok');
+      }
+      return;
+    }
 
+    var targetCloudLabel = appState.sharedSyncState.storageMode === 'firestore' ? 'Firebase' : 'server';
     var hasRemoteWarehouses = Array.isArray(res.warehousesMeta) && res.warehousesMeta.length > 0;
     if (!hasRemoteWarehouses) {
       var localSnap = buildSharedSnapshotFromLocal();
@@ -505,7 +513,7 @@ export async function pullSharedWarehouseState(isInitialOrManual?: boolean | str
       saveSyncPersistence(true);
       refreshRealtimeSubscription();
       if (isInitialOrManual === 'manual') {
-        showToast('Terhubung ke Firebase Firestore (database masih kosong)', 'info');
+        showToast('Terhubung ke ' + targetCloudLabel + ' (database masih kosong)', 'info');
       }
       return;
     }
@@ -530,9 +538,9 @@ export async function pullSharedWarehouseState(isInitialOrManual?: boolean | str
       triggerRenderOrDefer();
       refreshRealtimeSubscription();
       if (wasLoadedBefore && isInitialOrManual !== true) {
-        showToast('Data terbaru disinkronkan dari Firebase', 'info');
+        showToast('Data terbaru disinkronkan dari ' + targetCloudLabel, 'info');
       } else if (isInitialOrManual === 'manual') {
-        showToast('Data terbaru berhasil dimuat dari Firebase', 'ok');
+        showToast('Data terbaru berhasil dimuat dari ' + targetCloudLabel, 'ok');
       }
     } else {
       appState.sharedSyncState.revision = Number(res.revision || appState.sharedSyncState.revision || 1);
@@ -541,7 +549,7 @@ export async function pullSharedWarehouseState(isInitialOrManual?: boolean | str
       saveSyncPersistence(true);
       refreshRealtimeSubscription();
       if (isInitialOrManual === 'manual') {
-        showToast('Data sudah sinkron dengan Firebase', 'ok');
+        showToast('Data sudah sinkron dengan ' + targetCloudLabel, 'ok');
       }
     }
   } catch (err) {
@@ -549,7 +557,7 @@ export async function pullSharedWarehouseState(isInitialOrManual?: boolean | str
     if (err && err.status === 401) {
       void syncAppAuthStatus(true);
     } else if (isInitialOrManual === 'manual') {
-      showToast((err && err.message) || 'Koneksi Firebase tidak stabil, data lokal tetap aman', 'warn');
+      showToast((err && err.message) || 'Koneksi sinkronisasi tidak stabil, data lokal tetap aman', 'warn');
     }
   } finally {
     appState.sharedSyncState.inFlight = false;
@@ -584,6 +592,8 @@ export function startSharedSyncLoop() {
       if (!appState.sharedSyncState.inFlight && !appState.sharedSyncState.pushTimer && !appState.sharedSyncState.retryTimer) {
         void pushSharedWarehouseState();
       }
+    } else if (appState.sharedSyncState.storageMode !== 'firestore') {
+      void pullSharedWarehouseState(false);
     }
   }, 15000);
   if (appState.sharedSyncState.pending && appState.sharedSyncState.initialCloudLoaded) {

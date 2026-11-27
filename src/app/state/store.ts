@@ -198,27 +198,16 @@ function loadInitialSyncMeta(): SyncMeta {
 }
 
 function readInitialAuth() {
-  let tok = safeGetRaw(AUTH_TOKEN_KEY) || sessionGetRaw(AUTH_SESSION_TOKEN_KEY) || '';
-  if (tok && !decodeTokenPayload(tok)) {
-    safeDel(AUTH_TOKEN_KEY);
-    sessionSetRaw(AUTH_SESSION_TOKEN_KEY, '');
-    tok = '';
-  }
-  let pinTok = sessionGetRaw(PIN_TOKEN_KEY) || '';
-  let pinRole = sessionGetRaw(PIN_ROLE_KEY) || '';
-  if (pinTok && !decodeTokenPayload(pinTok)) {
-    sessionSetRaw(PIN_TOKEN_KEY, '');
-    sessionSetRaw(PIN_ROLE_KEY, '');
-    pinTok = '';
-    pinRole = '';
-  }
-  const decoded = decodeTokenPayload(tok);
+  safeDel(AUTH_TOKEN_KEY);
+  sessionSetRaw(AUTH_SESSION_TOKEN_KEY, '');
+  sessionSetRaw(PIN_TOKEN_KEY, '');
+  sessionSetRaw(PIN_ROLE_KEY, '');
   return {
     rememberDevice: safeGetRaw(AUTH_REMEMBER_KEY) !== '0',
-    token: tok,
-    email: (decoded && typeof decoded.sub === 'string' ? decoded.sub : '') || '',
-    pinToken: pinTok,
-    pinRole: (pinRole === 'admin' || pinRole === 'super_admin' ? pinRole : null) as 'admin' | 'super_admin' | null,
+    token: '',
+    email: '',
+    pinToken: '',
+    pinRole: null as 'admin' | 'super_admin' | null,
   };
 }
 
@@ -311,7 +300,7 @@ export const appState: AppStateContainer = {
     inFlight: false,
     pushing: false,
     pulling: false,
-    storageMode: 'firestore',
+    storageMode: 'file',
     hasSessionSecret: true,
     lastError: '',
     timer: null,

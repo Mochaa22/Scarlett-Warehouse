@@ -42,25 +42,36 @@ function formatFirebaseAuthError(err: unknown): string {
   if (code === 'auth/network-request-failed') {
     return 'Koneksi internet bermasalah saat menghubungi Google Auth. Periksa jaringan Anda.';
   }
-  return message || 'Gagal masuk dengan Google. Silakan coba lagi.';
+  return message || 'Gagal menghubungkan akun Google. Silakan coba lagi.';
 }
 
-// === GERBANG LOGIN FIREBASE (GOOGLE AUTH) ===
+// === GERBANG LOGIN EMAIL & PASSWORD + SYNC FIREBASE OPSIONAL ===
 export function setAuthUnlockedState(unlocked: boolean, email?: string | null, role?: any, options?: any) {
   var wasUnlocked = appState.appAuthStatusCache.authenticated;
   var prevEmail = appState.appAuthEmail;
+  var prevSyncMode = appState.sharedSyncState.storageMode;
+  var hasFirebaseUser = Boolean(options && options.hasFirebaseUser);
+
   appState.appAuthStatusCache.authenticated = Boolean(unlocked);
-  appState.sharedSyncState.storageMode = 'firestore';
+  if (hasFirebaseUser) {
+    appState.sharedSyncState.storageMode = 'firestore';
+  } else if (options && options.storageMode) {
+    appState.sharedSyncState.storageMode = options.storageMode;
+  } else if (prevSyncMode === 'firestore') {
+    appState.sharedSyncState.storageMode = 'file';
+  }
+
   var syncBtn = byId('cloud-sync-btn');
+  var logoutBtn = byId('app-logout-btn');
+
   if (unlocked) {
-    appState.appAuthEmail = String(email || '').trim();
+    appState.appAuthEmail = String(email || '').trim().toLowerCase();
     appState.appAuthSessionRole = normalizeAppRole(role || 'stockkeeper');
     if (appState.appAuthEmail && (!appState.W.user || appState.W.user === 'Admin Gudang')) {
       appState.W.user = appState.appAuthEmail;
       saveRegistry();
     }
     document.body.classList.remove('auth-locked');
-    var logoutBtn = byId('app-logout-btn');
     if (logoutBtn) logoutBtn.style.display = '';
     if (syncBtn) syncBtn.style.display = '';
     updateSyncButtonUI();
@@ -77,7 +88,7 @@ export function setAuthUnlockedState(unlocked: boolean, email?: string | null, r
         'warn'
       );
     }
-    if (!wasUnlocked || prevEmail !== appState.appAuthEmail) {
+    if (!wasUnlocked || prevEmail !== appState.appAuthEmail || (hasFirebaseUser && prevSyncMode !== 'firestore')) {
       if (!(options && options.skipRemoteCheck)) {
         void refreshPinStatus();
       }
@@ -92,80 +103,246 @@ export function setAuthUnlockedState(unlocked: boolean, email?: string | null, r
     appState.rolePreviewOverride = '';
     sessionSetRaw(ACTIVE_TAB_KEY, '');
     document.body.classList.add('auth-locked');
-    var logoutBtnHide = byId('app-logout-btn');
-    if (logoutBtnHide) logoutBtnHide.style.display = 'none';
+    if (logoutBtn) logoutBtn.style.display = 'none';
     if (syncBtn) syncBtn.style.display = 'none';
+    renderLoginScreen(options && options.errorText ? String(options.errorText) : '');
   }
+}
+
+export async function logoutAppSession(): Promise<void> {
+  appState.authTransitionSeq += 1;
+  appState.pinTransitionSeq += 1;
+  try {
+    var cloud = await waitForCloudBridge(1500);
+    if (cloud && cloud.appAuth && cloud.appAuth.logout) {
+      await cloud.appAuth.logout();
+    }
+    if (cloud && cloud.firebaseAuth && cloud.getUser && cloud.getUser()) {
+      await cloud.firebaseAuth.signOut();
+    }
+  } catch {
+    // ignore logout error
+  }
+  setAuthUnlockedState(false, null, null, { clearSyncState: false });
+  showToast('Anda telah keluar dari aplikasi.', 'info');
+}
+
+export async function connectGoogleCloudSync(): Promise<boolean> {
+  try {
+    var cloud = await waitForCloudBridge(2000);
+    if (!cloud || !cloud.firebaseAuth) {
+      throw new Error('Modul Firebase belum siap. Coba muat ulang halaman.');
+    }
+    var user = await cloud.firebaseAuth.signInWithGoogle(true);
+    try {
+      await cloud.firebaseAuth.ensureProfile(user);
+    } catch {
+      // ignore optional profile sync issue
+    }
+    appState.sharedSyncState.storageMode = 'firestore';
+    updateSyncButtonUI();
+    startSharedSyncLoop();
+    renderApp();
+    showToast('Sinkronisasi Firebase aktif (' + (user.email || user.displayName) + ')', 'ok');
+    return true;
+  } catch (err) {
+    showToast(formatFirebaseAuthError(err), 'err');
+    return false;
+  }
+}
+
+export async function disconnectGoogleCloudSync(): Promise<void> {
+  try {
+    var cloud = await waitForCloudBridge(2000);
+    if (cloud && cloud.firebaseAuth) {
+      await cloud.firebaseAuth.signOut();
+    }
+  } catch {
+    // ignore signout error
+  }
+  appState.sharedSyncState.storageMode = 'file';
+  updateSyncButtonUI();
+  startSharedSyncLoop();
+  renderApp();
+  showToast('Sinkronisasi Firebase diputuskan. Aplikasi tetap berjalan dengan login email.', 'info');
+}
+
+function bindPasswordToggle(btnId: string, inputId: string) {
+  var toggleBtn = byId(btnId);
+  var inp = byId(inputId) as HTMLInputElement | null;
+  if (!toggleBtn || !inp) return;
+  toggleBtn.addEventListener('click', function () {
+    var show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    toggleBtn.textContent = show ? 'Sembunyikan' : 'Tampilkan';
+  });
 }
 
 export function renderLoginScreen(errorText?: string) {
   var body = byId('app-login-body');
   if (!body) return;
-  if (!appState.appAuthStatusCache.loaded) {
-    body.innerHTML = '<p class="muted" style="font-size:13px;margin:0">Memeriksa sesi Firebase…</p>';
-    return;
-  }
 
-  var errHtml = errorText
+  var st = appState.appAuthStatusCache;
+  var errBanner = errorText
     ? '<div class="inline-alert err" style="margin-bottom:14px">' + esc(errorText) + '</div>'
     : '';
 
-  var rememberCheckboxHtml =
-    '<label class="login-remember-row" for="login-remember-device">' +
-    '<input id="login-remember-device" type="checkbox"' +
-    (appState.appAuthRememberDevice ? ' checked' : '') +
-    ' />' +
-    '<span>Ingat perangkat ini (otomatis masuk tanpa login ulang)</span>' +
-    '</label>';
+  if (!st.loaded) {
+    body.innerHTML =
+      errBanner +
+      '<div class="login-form-head"><h1 class="login-form-title">Memeriksa Sesi</h1>' +
+      '<p class="login-form-desc">Menghubungkan ke server autentikasi…</p></div>' +
+      '<button type="button" class="btn btn-primary login-submit-cta" id="auth-retry-btn">Coba Lagi</button>';
+    var retryBtn = byId('auth-retry-btn');
+    if (retryBtn) {
+      retryBtn.addEventListener('click', function () {
+        void syncAppAuthStatus(false);
+      });
+    }
+    return;
+  }
 
-  var googleIconSvg =
-    '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" style="flex-shrink:0">' +
-    '<path fill="#EA4335" d="M12 5c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 1.09 14.97 0 12 0 7.39 0 3.44 2.65 1.52 6.53l3.66 2.84C6.07 6.72 8.79 5 12 5z"/>' +
-    '<path fill="#4285F4" d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58l3.72 2.89c2.17-2 3.7-4.96 3.7-8.71z"/>' +
-    '<path fill="#FBBC05" d="M5.18 14.63A7.22 7.22 0 0 1 4.8 12c0-.91.16-1.8.38-2.63L1.52 6.53A11.97 11.97 0 0 0 0 12c0 1.93.46 3.75 1.52 5.47l3.66-2.84z"/>' +
-    '<path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.72-2.89c-1.07.72-2.45 1.15-4.21 1.15-3.21 0-5.93-2.17-6.91-5.1L1.52 17.47C3.44 21.35 7.39 24 12 24z"/>' +
-    '</svg>';
+  if (!st.configured) {
+    body.innerHTML =
+      '<div class="login-form-head">' +
+      '<h1 class="login-form-title">Buat Akun Login</h1>' +
+      '<p class="login-form-desc">Daftarkan email dan kata sandi utama untuk mengakses sistem gudang.</p>' +
+      '</div>' +
+      errBanner +
+      '<form id="form-app-setup" novalidate>' +
+      '<div class="field"><label for="auth-email">Email</label>' +
+      '<input id="auth-email" type="email" class="input" required autocomplete="username" placeholder="nama@perusahaan.com" /></div>' +
+      '<div class="field"><label for="auth-password">Password (min. 6 karakter)</label>' +
+      '<div class="login-pw-wrap">' +
+      '<input id="auth-password" type="password" class="input" required minlength="6" maxlength="128" autocomplete="new-password" placeholder="Masukkan password…" />' +
+      '<button type="button" class="login-pw-toggle" id="toggle-pw-btn">Tampilkan</button>' +
+      '</div></div>' +
+      '<div class="field"><label for="auth-password-confirm">Ulangi Password</label>' +
+      '<input id="auth-password-confirm" type="password" class="input" required minlength="6" maxlength="128" autocomplete="new-password" placeholder="Ulangi password…" /></div>' +
+      '<label class="login-remember-row">' +
+      '<input type="checkbox" id="auth-remember"' + (appState.appAuthRememberDevice ? ' checked' : '') + ' />' +
+      '<span>Ingat sesi login di perangkat ini</span>' +
+      '</label>' +
+      '<button type="submit" class="btn btn-primary login-submit-cta" id="auth-submit-btn">Simpan Akun &amp; Masuk</button>' +
+      '</form>';
+
+    bindPasswordToggle('toggle-pw-btn', 'auth-password');
+
+    var setupForm = byId('form-app-setup') as HTMLFormElement | null;
+    if (setupForm) {
+      setupForm.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        var email = ((byId('auth-email') as HTMLInputElement | null)?.value || '').trim();
+        var password = (byId('auth-password') as HTMLInputElement | null)?.value || '';
+        var confirmPw = (byId('auth-password-confirm') as HTMLInputElement | null)?.value || '';
+        var rememberDevice = Boolean((byId('auth-remember') as HTMLInputElement | null)?.checked);
+        var submitBtn = byId('auth-submit-btn') as HTMLButtonElement | null;
+
+        if (!email || !email.includes('@')) {
+          renderLoginScreen('Masukkan alamat email yang valid.');
+          return;
+        }
+        if (password.length < 6) {
+          renderLoginScreen('Password minimal 6 karakter.');
+          return;
+        }
+        if (password !== confirmPw) {
+          renderLoginScreen('Konfirmasi password tidak cocok.');
+          return;
+        }
+
+        if (submitBtn) {
+          submitBtn.disabled = true;
+          submitBtn.textContent = 'Menyimpan…';
+        }
+        try {
+          var cloud = await waitForCloudBridge(2000);
+          if (!cloud || !cloud.appAuth) throw new Error('Modul server belum siap. Coba muat ulang.');
+          var res = await cloud.appAuth.setup({ email, password, rememberDevice });
+          appState.authTransitionSeq += 1;
+          appState.appAuthStatusCache = {
+            loaded: true,
+            configured: true,
+            envManaged: false,
+            authenticated: true,
+          };
+          persistAppAuthToken(res.token, res.rememberDevice);
+          var hasFb = Boolean(cloud.getUser && cloud.getUser());
+          setAuthUnlockedState(true, res.email, res.role || 'stockkeeper', {
+            hasFirebaseUser: hasFb,
+            freshLogin: true,
+          });
+          showToast('Akun login berhasil dibuat. Selamat datang!', 'ok');
+        } catch (err: any) {
+          renderLoginScreen((err && err.message) || 'Gagal membuat akun login.');
+        }
+      });
+    }
+    return;
+  }
 
   body.innerHTML =
     '<div class="login-form-head">' +
-    '<h2 class="login-form-title">Masuk ke Sarlett Inventory</h2>' +
-    '<p class="login-form-desc">Gunakan akun Google untuk memulai sesi Stockkeeper dan menyinkronkan data gudang ke Firebase Cloud.</p>' +
+    '<h1 class="login-form-title">Masuk ke Sistem Gudang</h1>' +
+    '<p class="login-form-desc">Masukkan email dan password yang terdaftar untuk melanjutkan.</p>' +
     '</div>' +
-    errHtml +
-    rememberCheckboxHtml +
-    '<button type="button" class="btn btn-primary login-submit-cta" id="btn-google-login" style="display:flex;align-items:center;justify-content:center;gap:10px;width:100%">' +
-    googleIconSvg +
-    '<span>Masuk dengan Google</span>' +
-    '</button>';
+    errBanner +
+    '<form id="form-app-login" novalidate>' +
+    '<div class="field"><label for="auth-email">Email</label>' +
+    '<input id="auth-email" type="email" class="input" required autocomplete="username" placeholder="nama@perusahaan.com" /></div>' +
+    '<div class="field"><label for="auth-password">Password</label>' +
+    '<div class="login-pw-wrap">' +
+    '<input id="auth-password" type="password" class="input" required maxlength="128" autocomplete="current-password" placeholder="Masukkan password…" />' +
+    '<button type="button" class="login-pw-toggle" id="toggle-pw-btn">Tampilkan</button>' +
+    '</div></div>' +
+    '<label class="login-remember-row">' +
+    '<input type="checkbox" id="auth-remember"' + (appState.appAuthRememberDevice ? ' checked' : '') + ' />' +
+    '<span>Ingat sesi login di perangkat ini</span>' +
+    '</label>' +
+    '<button type="submit" class="btn btn-primary login-submit-cta" id="auth-submit-btn">Masuk</button>' +
+    '</form>';
 
-  var loginBtn = byId('btn-google-login') as HTMLButtonElement | null;
-  if (loginBtn) {
-    loginBtn.addEventListener('click', async function () {
-      var rememberEl = byId('login-remember-device') as HTMLInputElement | null;
-      var rememberVal = rememberEl ? Boolean(rememberEl.checked) : true;
-      persistAppAuthToken('', rememberVal);
-      loginBtn.disabled = true;
-      var span = loginBtn.querySelector('span');
-      if (span) span.textContent = 'Menghubungkan ke Google…';
+  bindPasswordToggle('toggle-pw-btn', 'auth-password');
+
+  var loginForm = byId('form-app-login') as HTMLFormElement | null;
+  if (loginForm) {
+    loginForm.addEventListener('submit', async function (e) {
+      e.preventDefault();
+      var email = ((byId('auth-email') as HTMLInputElement | null)?.value || '').trim();
+      var password = (byId('auth-password') as HTMLInputElement | null)?.value || '';
+      var rememberDevice = Boolean((byId('auth-remember') as HTMLInputElement | null)?.checked);
+      var submitBtn = byId('auth-submit-btn') as HTMLButtonElement | null;
+
+      if (!email || !password) {
+        renderLoginScreen('Email dan password wajib diisi.');
+        return;
+      }
+
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Memeriksa…';
+      }
       try {
         var cloud = await waitForCloudBridge(2000);
-        if (!cloud || !cloud.firebaseAuth) {
-          throw new Error('Modul autentikasi Firebase belum siap. Muat ulang halaman.');
-        }
-        var user = await cloud.firebaseAuth.signInWithGoogle(rememberVal);
+        if (!cloud || !cloud.appAuth) throw new Error('Modul server belum siap. Coba muat ulang.');
+        var res = await cloud.appAuth.login({ email, password, rememberDevice });
         appState.authTransitionSeq += 1;
-        appState.appAuthStatusCache = {
-          loaded: true,
-          configured: true,
-          envManaged: false,
-          authenticated: true,
-        };
-        setAuthUnlockedState(true, user.email || user.displayName || 'operator', 'stockkeeper', {
+        appState.appAuthStatusCache.authenticated = true;
+        appState.appAuthStatusCache.configured = true;
+        persistAppAuthToken(res.token, res.rememberDevice);
+        var hasFb = Boolean(cloud.getUser && cloud.getUser());
+        setAuthUnlockedState(true, res.email, res.role || 'stockkeeper', {
+          hasFirebaseUser: hasFb,
           freshLogin: true,
         });
-        showToast('Berhasil masuk sebagai Stockkeeper (' + (user.email || user.displayName) + ')', 'ok');
-      } catch (err) {
-        renderLoginScreen(formatFirebaseAuthError(err));
+        showToast('Berhasil masuk sebagai ' + res.email, 'ok');
+      } catch (err: any) {
+        if (err && err.needsSetup) {
+          appState.appAuthStatusCache.configured = false;
+          renderLoginScreen('Belum ada akun di server. Silakan buat akun login terlebih dahulu.');
+          return;
+        }
+        renderLoginScreen((err && err.message) || 'Email atau password salah.');
       }
     });
   }
@@ -176,27 +353,57 @@ export async function syncAppAuthStatus(preserveError?: boolean) {
   var cloud = await waitForCloudBridge(2000);
   if (mySeq !== appState.authTransitionSeq) return;
 
-  if (!cloud || !cloud.getUser) {
-    appState.appAuthStatusCache.loaded = true;
-    if (!preserveError) renderLoginScreen('Modul Firebase belum siap. Coba muat ulang halaman.');
+  if (!cloud || !cloud.appAuth) {
+    appState.appAuthStatusCache = {
+      loaded: false,
+      configured: true,
+      envManaged: false,
+      authenticated: false,
+    };
+    setAuthUnlockedState(false, null, null, {
+      errorText: 'Gagal menghubungi modul autentikasi.',
+    });
     return;
   }
 
-  var curUser = cloud.getUser();
-  appState.appAuthStatusCache = {
-    loaded: true,
-    configured: true,
-    envManaged: false,
-    authenticated: Boolean(curUser),
-  };
+  try {
+    var res = await cloud.appAuth.getStatus(appState.appAuthToken || null);
+    if (mySeq !== appState.authTransitionSeq) return;
 
-  if (curUser) {
-    setAuthUnlockedState(true, curUser.email || curUser.displayName, 'stockkeeper', {
-      skipRemoteCheck: false,
+    appState.appAuthStatusCache = {
+      loaded: true,
+      configured: Boolean(res.configured),
+      envManaged: Boolean(res.envManaged),
+      authenticated: Boolean(res.authenticated),
+    };
+    if (res.token) {
+      persistAppAuthToken(res.token, res.rememberDevice);
+    }
+
+    var hasFb = Boolean(cloud.getUser && cloud.getUser());
+    if (res.authenticated) {
+      setAuthUnlockedState(true, res.email || 'operator', res.role || 'stockkeeper', {
+        hasFirebaseUser: hasFb,
+        storageMode: res.storageMode,
+        skipRemoteCheck: false,
+      });
+    } else {
+      setAuthUnlockedState(false, null, null, {
+        storageMode: res.storageMode,
+        errorText: preserveError ? 'Sesi login berakhir. Silakan masuk kembali.' : '',
+      });
+    }
+  } catch (err: any) {
+    if (mySeq !== appState.authTransitionSeq) return;
+    appState.appAuthStatusCache = {
+      loaded: false,
+      configured: true,
+      envManaged: false,
+      authenticated: false,
+    };
+    setAuthUnlockedState(false, null, null, {
+      errorText: (err && err.message) || 'Gagal memeriksa status login dari server.',
     });
-  } else {
-    setAuthUnlockedState(false, '', null, { clearSyncState: false });
-    if (!preserveError) renderLoginScreen('');
   }
 }
 
@@ -206,21 +413,9 @@ export async function initAppAuthGate(_hadValidLocalSession?: boolean) {
     logoutBtn.addEventListener('click', function () {
       confirmDialog(
         'Keluar Aplikasi',
-        '<p style="margin:0">Keluar dari sesi Google saat ini dan kembali ke halaman masuk?</p>',
+        '<p style="margin:0">Keluar dari sesi login saat ini?</p>',
         async function () {
-          appState.authTransitionSeq += 1;
-          appState.pinTransitionSeq += 1;
-          setAuthUnlockedState(false, '', null, { clearSyncState: true });
-          try {
-            var cloud = await waitForCloudBridge(2000);
-            if (cloud && cloud.firebaseAuth) {
-              await cloud.firebaseAuth.signOut();
-            }
-          } catch {
-            // ignore signout error
-          }
-          renderLoginScreen('');
-          showToast('Anda telah keluar dari aplikasi', 'info');
+          await logoutAppSession();
         },
         false
       );
@@ -257,40 +452,5 @@ export async function initAppAuthGate(_hadValidLocalSession?: boolean) {
     }
   });
 
-  var cloud = await waitForCloudBridge(2000);
-  if (!cloud || !cloud.firebaseAuth) {
-    appState.appAuthStatusCache.loaded = true;
-    renderLoginScreen('Gagal memuat Firebase SDK.');
-    return;
-  }
-
-  await new Promise<void>(function (resolve) {
-    var resolved = false;
-    cloud.firebaseAuth.onAuthStateChanged(async function (user: any) {
-      appState.authTransitionSeq += 1;
-      appState.appAuthStatusCache = {
-        loaded: true,
-        configured: true,
-        envManaged: false,
-        authenticated: Boolean(user),
-      };
-
-      if (user) {
-        try {
-          await cloud.firebaseAuth.ensureProfile(user);
-        } catch (profileErr) {
-          console.error('ensureProfile error:', profileErr);
-        }
-        setAuthUnlockedState(true, user.email || user.displayName || 'operator', 'stockkeeper');
-      } else {
-        setAuthUnlockedState(false, '', null, { clearSyncState: false });
-        renderLoginScreen('');
-      }
-
-      if (!resolved) {
-        resolved = true;
-        resolve();
-      }
-    });
-  });
+  await syncAppAuthStatus(false);
 }

@@ -185,6 +185,41 @@ function getPinSessionRoleFromToken(pinToken: string | null | undefined): 'admin
   }
 }
 
+async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, {
+    credentials: 'include',
+    ...init,
+    headers: {
+      'X-Requested-With': 'XMLHttpRequest',
+      ...(init?.headers || {}),
+    },
+  });
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) {
+    const err = new Error(
+      typeof data.error === 'string' && data.error
+        ? data.error
+        : `Permintaan server gagal (${res.status})`
+    ) as Error & { status?: number; needsSetup?: boolean; conflict?: boolean };
+    err.status = res.status;
+    if (typeof data.needsSetup === 'boolean') err.needsSetup = data.needsSetup;
+    if (typeof data.conflict === 'boolean') err.conflict = data.conflict;
+    throw err;
+  }
+  return data as T;
+}
+
+function buildAuthHeaders(authToken?: string | null, pinToken?: string | null): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (authToken) {
+    headers['X-App-Auth'] = authToken;
+  }
+  if (pinToken) {
+    headers['X-Pin-Token'] = pinToken;
+  }
+  return headers;
+}
+
 export function initCloudBridge(): void {
   if (typeof window === 'undefined') return;
 
@@ -212,15 +247,83 @@ export function initCloudBridge(): void {
     },
 
     appAuth: {
-      async listUsers(): Promise<{
+      async getStatus(authToken?: string | null): Promise<{
+        configured: boolean;
+        envManaged: boolean;
+        authenticated: boolean;
+        email: string | null;
+        role: 'stockkeeper' | 'admin' | 'super_admin' | null;
+        rememberDevice: boolean;
+        token: string | null;
+        storageMode: StorageMode;
+        hasSessionSecret: boolean;
+      }> {
+        return requestJson('/api/auth/status', {
+          method: 'GET',
+          headers: buildAuthHeaders(authToken),
+        });
+      },
+
+      async setup(payload: {
+        email: string;
+        password: string;
+        rememberDevice?: boolean;
+      }): Promise<{
+        token: string;
+        email: string;
+        role: 'stockkeeper' | 'admin' | 'super_admin';
+        expiresAt: number;
+        rememberDevice: boolean;
+      }> {
+        return requestJson('/api/auth/setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      },
+
+      async login(payload: {
+        email: string;
+        password: string;
+        rememberDevice?: boolean;
+      }): Promise<{
+        token: string;
+        email: string;
+        role: 'stockkeeper' | 'admin' | 'super_admin';
+        expiresAt: number;
+        rememberDevice: boolean;
+      }> {
+        return requestJson('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      },
+
+      async logout(): Promise<{ ok: boolean }> {
+        return requestJson('/api/auth/logout', {
+          method: 'POST',
+        });
+      },
+
+      async listUsers(
+        pinToken?: string | null,
+        authToken?: string | null
+      ): Promise<{
         storageMode: StorageMode;
         primaryEmail: string | null;
-        primarySource: 'firestore' | null;
+        primarySource: 'firestore' | 'env' | 'stored' | null;
         envUsers: OperatorUserInfo[];
         users: OperatorUserInfo[];
       }> {
-        const records = await listRoleAssignments();
         const curUser = auth.currentUser;
+        if (!curUser) {
+          return requestJson('/api/auth/users', {
+            method: 'GET',
+            headers: buildAuthHeaders(authToken, pinToken),
+          });
+        }
+        const records = await listRoleAssignments();
         return {
           storageMode: 'firestore',
           primaryEmail: curUser?.email || null,
@@ -237,13 +340,32 @@ export function initCloudBridge(): void {
         };
       },
 
-      async saveUser(payload: {
-        email: string;
-        name?: string;
-        role?: 'stockkeeper' | 'admin' | 'super_admin';
-        warehouseId?: string;
-        warehouseName?: string;
-      }): Promise<{ ok: boolean; storageMode: StorageMode; users: OperatorUserInfo[] }> {
+      async saveUser(
+        payload: {
+          email: string;
+          name?: string;
+          password?: string;
+          role?: 'stockkeeper' | 'admin' | 'super_admin';
+          warehouseId?: string;
+          warehouseName?: string;
+        },
+        pinToken?: string | null,
+        authToken?: string | null
+      ): Promise<{ ok: boolean; storageMode: StorageMode; users: OperatorUserInfo[] }> {
+        if (!auth.currentUser) {
+          return requestJson('/api/auth/users', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...buildAuthHeaders(authToken, pinToken),
+            },
+            body: JSON.stringify({
+              email: payload.email,
+              name: payload.name || '',
+              password: payload.password || '',
+            }),
+          });
+        }
         const records = await saveRoleAssignment({
           email: payload.email,
           displayName: payload.name,
@@ -266,8 +388,20 @@ export function initCloudBridge(): void {
       },
 
       async deleteUser(
-        email: string
+        email: string,
+        pinToken?: string | null,
+        authToken?: string | null
       ): Promise<{ ok: boolean; storageMode: StorageMode; users: OperatorUserInfo[] }> {
+        if (!auth.currentUser) {
+          return requestJson('/api/auth/users', {
+            method: 'DELETE',
+            headers: {
+              'Content-Type': 'application/json',
+              ...buildAuthHeaders(authToken, pinToken),
+            },
+            body: JSON.stringify({ email }),
+          });
+        }
         const records = await deleteRoleAssignment(email);
         return {
           ok: true,
@@ -285,7 +419,10 @@ export function initCloudBridge(): void {
     },
 
     pinAuth: {
-      async getStatus(pinToken: string | null): Promise<{
+      async getStatus(
+        pinToken: string | null,
+        authToken?: string | null
+      ): Promise<{
         configured: boolean;
         envManaged: boolean;
         hasAdminPin: boolean;
@@ -293,6 +430,12 @@ export function initCloudBridge(): void {
         sessionValid: boolean;
         sessionRole: 'admin' | 'super_admin' | null;
       }> {
+        if (!auth.currentUser) {
+          return requestJson('/api/pin/status', {
+            method: 'GET',
+            headers: buildAuthHeaders(authToken, pinToken),
+          });
+        }
         const st = await getFirestorePinStatus();
         const sessionRole = getPinSessionRoleFromToken(pinToken);
         return {
@@ -307,8 +450,19 @@ export function initCloudBridge(): void {
 
       async setupPins(
         payload: { superAdminPin: string; adminPin: string; currentSuperAdminPin?: string },
-        pinToken: string | null
+        pinToken: string | null,
+        authToken?: string | null
       ): Promise<{ token: string; role: 'admin' | 'super_admin'; expiresAt: number }> {
+        if (!auth.currentUser) {
+          return requestJson('/api/pin/setup', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...buildAuthHeaders(authToken, pinToken),
+            },
+            body: JSON.stringify(payload),
+          });
+        }
         const sessionRole = getPinSessionRoleFromToken(pinToken);
         return setupFirestorePins({
           superAdminPin: payload.superAdminPin,
@@ -320,14 +474,38 @@ export function initCloudBridge(): void {
 
       async verifyPin(
         targetRole: 'admin' | 'super_admin',
-        pin: string
+        pin: string,
+        authToken?: string | null
       ): Promise<{ token: string; role: 'admin' | 'super_admin'; expiresAt: number }> {
+        if (!auth.currentUser) {
+          return requestJson('/api/pin/verify', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...buildAuthHeaders(authToken),
+            },
+            body: JSON.stringify({ targetRole, pin }),
+          });
+        }
         return verifyFirestorePin(targetRole, pin);
       },
     },
 
     warehouse: {
-      async getState(): Promise<SharedWarehouseStateResponse> {
+      async getState(
+        since?: number | null,
+        authToken?: string | null
+      ): Promise<SharedWarehouseStateResponse> {
+        if (!auth.currentUser) {
+          const qs =
+            typeof since === 'number' && Number.isFinite(since) && since >= 0
+              ? `?since=${encodeURIComponent(String(since))}`
+              : '';
+          return requestJson<SharedWarehouseStateResponse>(`/api/warehouse/state${qs}`, {
+            method: 'GET',
+            headers: buildAuthHeaders(authToken),
+          });
+        }
         const snap = await pullAllWarehousesFromFirestore();
         lastFirestoreSnap = JSON.parse(JSON.stringify(snap)) as CloudWarehouseSnapshot;
         localSyncSeq += 1;
@@ -342,11 +520,28 @@ export function initCloudBridge(): void {
         };
       },
 
-      async saveState(payload: {
-        baseRevision?: number;
-        warehousesMeta: WarehouseMetaRecord[];
-        warehouses: Record<string, Record<string, unknown>>;
-      }): Promise<SaveWarehouseStateResult> {
+      async saveState(
+        payload: {
+          baseRevision?: number;
+          warehousesMeta: WarehouseMetaRecord[];
+          warehouses: Record<string, Record<string, unknown>>;
+        },
+        authToken?: string | null
+      ): Promise<SaveWarehouseStateResult> {
+        if (!auth.currentUser) {
+          return requestJson<SaveWarehouseStateResult>('/api/warehouse/state', {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              ...buildAuthHeaders(authToken),
+            },
+            body: JSON.stringify({
+              baseRevision: Number(payload.baseRevision || 0),
+              warehousesMeta: payload.warehousesMeta,
+              warehouses: payload.warehouses,
+            }),
+          });
+        }
         const nextSnap: CloudWarehouseSnapshot = {
           warehousesMeta: payload.warehousesMeta.map((m, idx) => ({
             id: m.id,
@@ -369,6 +564,10 @@ export function initCloudBridge(): void {
       },
 
       subscribeRealtime(warehouseIds: string[], onRemoteUpdate: () => void): void {
+        if (!auth.currentUser) {
+          stopFirestoreRealtime();
+          return;
+        }
         subscribeFirestoreRealtime(warehouseIds, onRemoteUpdate);
       },
 
