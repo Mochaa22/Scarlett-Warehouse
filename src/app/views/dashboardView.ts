@@ -97,7 +97,7 @@ export function renderDashboard(root, d, an) {
       return '<strong>' + esc(b.nama || b.sku) + '</strong> (' + esc(b.lok || '-') + ', Exp ' + esc(b.exp) + ' · ' + esc(b.expInfo.label) + ')';
     }).join(' · ');
     html += '<div class="exp-banner' + (st.expiredCount > 0 ? ' critical' : '') + '">' +
-      '<div style="flex:1;min-width:240px">' +
+      '<div class="exp-banner-body">' +
       '<div class="exp-banner-title">' + iconSvg('expire') + '<span>' +
       (st.expiredCount > 0 ? 'Perhatian FEFO: Ada Barang Expired / Mendekati Expire (&lt; ' + expMonths + ' Bulan)' : 'Pengingat FEFO: Barang Mendekati Expire &lt; ' + expMonths + ' Bulan') +
       '</span></div>' +

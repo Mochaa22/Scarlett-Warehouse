@@ -83,7 +83,7 @@ export function renderStok(root, d, an) {
     '</div>' +
     '</div>' +
     '<div class="toolbar">' +
-    '<select id="stok-cat-filter" class="input" aria-label="Filter kategori produk" style="width:auto;min-width:170px">' +
+    '<select id="stok-cat-filter" class="input filter-select" aria-label="Filter kategori produk">' +
     '<option value="">Semua Kategori</option>' +
     allCats.map(function (c) {
       return '<option value="' + esc(c) + '"' + (appState.stokCategoryFilter === c ? ' selected' : '') + '>' + esc(c) + '</option>';

@@ -83,7 +83,7 @@ export function renderInbound(root, d, an) {
   );
 
   html += '<details class="card" id="inbound-register"></details>';
-  html += '<div class="kpi-grid" style="grid-template-columns:repeat(4,minmax(0,1fr))">' +
+  html += '<div class="kpi-grid">' +
     '<div class="kpi-card ' + (pendingRows.length > 0 ? 'warn' : 'ok') + ' clickable" data-inb-kpi-filt="pending"><div class="kpi-top"><div class="kpi-label">Menunggu Total</div><div class="kpi-tag">Antrean</div></div><div class="kpi-value num" id="inb-kpi-pending">' + fmtNum(pendingRows.length) + ' baris</div><div class="kpi-sub">Total ' + fmtNum(pendingPcs) + ' PCS belum masuk Ancantho</div></div>' +
     '<div class="kpi-card ok clickable" data-inb-kpi-filt="match"><div class="kpi-top"><div class="kpi-label">✓ Match Siap Submit</div><div class="kpi-tag">Cocok</div></div><div class="kpi-value num" id="inb-kpi-match">' + fmtNum(matchedRows.length) + ' baris</div><div class="kpi-sub">Siap di-submit Done sekaligus</div></div>' +
     '<div class="kpi-card ' + (mismatchRows.length > 0 ? 'warn' : 'ok') + ' clickable" data-inb-kpi-filt="mismatch"><div class="kpi-top"><div class="kpi-label">Selisih Qty</div><div class="kpi-tag">Cek Ulang</div></div><div class="kpi-value num" id="inb-kpi-diff">' + fmtNum(mismatchRows.length) + ' baris</div><div class="kpi-sub">Qty Stockkeeper vs Inbound berbeda</div></div>' +
@@ -121,7 +121,7 @@ export function renderInbound(root, d, an) {
     '</div></div>' +
     '<div class="toolbar">' +
     '<div class="search-wrap"><input id="search-inbound" type="search" class="input" placeholder="Cari produk, barcode, supplier, no doc, lokasi, PIC…" value="' + esc(appState.inboundSearch || '') + '" /><span class="search-kbd">/</span></div>' +
-    '<select id="inb-period-filt" class="input" style="max-width:170px" aria-label="Filter Periode Surat Jalan">' +
+    '<select id="inb-period-filt" class="input filter-select" aria-label="Filter Periode Surat Jalan">' +
     '<option value="all"' + (appState.inboundPeriod === 'all' ? ' selected' : '') + '>Semua Waktu</option>' +
     '<option value="month"' + (appState.inboundPeriod === 'month' ? ' selected' : '') + '>Bulan Ini</option>' +
     '<option value="today"' + (appState.inboundPeriod === 'today' ? ' selected' : '') + '>Hari Ini</option>' +
@@ -130,8 +130,8 @@ export function renderInbound(root, d, an) {
     '<option value="custom"' + (appState.inboundPeriod === 'custom' ? ' selected' : '') + '>Rentang Tanggal</option>' +
     '</select>' +
     (appState.inboundPeriod === 'custom'
-      ? '<input id="inb-from" type="date" class="input" style="max-width:155px" value="' + esc(appState.inboundFrom || '') + '" aria-label="Dari tanggal" />' +
-        '<input id="inb-to" type="date" class="input" style="max-width:155px" value="' + esc(appState.inboundTo || '') + '" aria-label="Sampai tanggal" />'
+      ? '<input id="inb-from" type="date" class="input filter-date" value="' + esc(appState.inboundFrom || '') + '" aria-label="Dari tanggal" />' +
+        '<input id="inb-to" type="date" class="input filter-date" value="' + esc(appState.inboundTo || '') + '" aria-label="Sampai tanggal" />'
       : '') +
     '<button type="button" class="btn btn-primary btn-sm" id="inbound-export-xlsx-btn">' + iconSvg('download') + '<span>Download Excel (.xlsx)</span></button>' +
     '</div>' +

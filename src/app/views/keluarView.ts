@@ -48,7 +48,7 @@ export function renderKeluar(root, d, an) {
   var q = appState.searchState.keluar.trim().toUpperCase();
   var keluarPeriodLabel = getPeriodLabel(appState.keluarPeriod, appState.keluarFrom, appState.keluarTo);
   var keluarToolbarControls =
-    '<select id="keluar-period-filt" class="input" style="max-width:170px" aria-label="Filter Periode Barang Keluar">' +
+    '<select id="keluar-period-filt" class="input filter-select" aria-label="Filter Periode Barang Keluar">' +
     '<option value="all"' + (appState.keluarPeriod === 'all' ? ' selected' : '') + '>Semua Waktu</option>' +
     '<option value="month"' + (appState.keluarPeriod === 'month' ? ' selected' : '') + '>Bulan Ini</option>' +
     '<option value="today"' + (appState.keluarPeriod === 'today' ? ' selected' : '') + '>Hari Ini</option>' +
@@ -57,8 +57,8 @@ export function renderKeluar(root, d, an) {
     '<option value="custom"' + (appState.keluarPeriod === 'custom' ? ' selected' : '') + '>Rentang Tanggal</option>' +
     '</select>' +
     (appState.keluarPeriod === 'custom'
-      ? '<input id="keluar-from" type="date" class="input" style="max-width:155px" value="' + esc(appState.keluarFrom || '') + '" aria-label="Dari tanggal" />' +
-        '<input id="keluar-to" type="date" class="input" style="max-width:155px" value="' + esc(appState.keluarTo || '') + '" aria-label="Sampai tanggal" />'
+      ? '<input id="keluar-from" type="date" class="input filter-date" value="' + esc(appState.keluarFrom || '') + '" aria-label="Dari tanggal" />' +
+        '<input id="keluar-to" type="date" class="input filter-date" value="' + esc(appState.keluarTo || '') + '" aria-label="Sampai tanggal" />'
       : '') +
     '<button type="button" class="btn btn-primary btn-sm" id="keluar-export-xlsx-btn">' + iconSvg('download') + '<span>Download Excel (.xlsx)</span></button>';
   var activeFilteredKeluar: any[] = [];
@@ -703,7 +703,7 @@ export function renderKeluar(root, d, an) {
     var pendingPcs = allKeluar.filter(function (r) { return !isMasukAncanthoDone(r); }).reduce(function (s, r) { return s + Number(r.qty || 0); }, 0);
     var donePcs = allKeluar.filter(function (r) { return isMasukAncanthoDone(r); }).reduce(function (s, r) { return s + Number(r.qty || 0); }, 0);
 
-    html += '<div class="kpi-grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">' +
+    html += '<div class="kpi-grid kpi-grid-2">' +
       '<div class="kpi-card ' + (pendingCount > 0 ? 'warn' : 'ok') + '"><div class="kpi-top"><div class="kpi-label">Menunggu Input ke Ancantho</div><div class="kpi-tag">Antrean Keluar</div></div><div class="kpi-value num">' + fmtNum(pendingCount) + ' baris</div><div class="kpi-sub">Total ' + fmtNum(pendingPcs) + ' PCS siap diproses sesuai lokasi Stockkeeper</div></div>' +
       '<div class="kpi-card ok"><div class="kpi-top"><div class="kpi-label">Sudah Done di Ancantho</div><div class="kpi-tag">Terverifikasi Admin</div></div><div class="kpi-value num">' + fmtNum(doneCount) + ' baris</div><div class="kpi-sub">Total ' + fmtNum(donePcs) + ' PCS sudah selesai diinput ke Ancantho</div></div>' +
       '</div>';

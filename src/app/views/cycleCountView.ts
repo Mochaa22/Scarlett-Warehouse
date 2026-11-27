@@ -292,7 +292,7 @@ export function renderCycleCount(root, d, an) {
         '</div>' +
         '<div class="toolbar">' +
         '<div class="search-wrap"><input id="cc-pick-search" type="search" class="input" placeholder="Cari SKU, barcode, nama produk…" value="' + esc(cyclePickerSearch) + '" /><span class="search-kbd">/</span></div>' +
-        '<select id="cc-pick-cat" class="input" style="width:auto;min-width:160px"><option value="">Semua Kategori</option>' +
+        '<select id="cc-pick-cat" class="input filter-select"><option value="">Semua Kategori</option>' +
         pickCats.map(function (cat) { return '<option value="' + esc(cat) + '"' + (cyclePickerCat === cat ? ' selected' : '') + '>' + esc(cat) + '</option>'; }).join('') +
         '</select>' +
         '<div class="seg-group">' +
@@ -422,7 +422,7 @@ export function renderCycleCount(root, d, an) {
       '<button type="button" class="btn btn-sm" id="cc-petugas-csv-btn">Download CSV</button>' +
       '</div></div>' +
       '<div class="scanner-bar" style="margin-bottom:0">' +
-      '<div class="scan-row" style="flex:1;min-width:210px"><input id="cc-scan-inp" type="text" class="input mono" placeholder="Scan barcode / ketik SKU untuk langsung hitung…" autocapitalize="characters" enterkeyhint="search" autocomplete="off" /><button type="button" class="btn btn-primary" id="cc-cam-btn">Kamera HP</button></div>' +
+      '<div class="scan-row"><input id="cc-scan-inp" type="text" class="input mono" placeholder="Scan barcode / ketik SKU untuk langsung hitung…" autocapitalize="characters" enterkeyhint="search" autocomplete="off" /><button type="button" class="btn btn-primary" id="cc-cam-btn">Kamera HP</button></div>' +
       '<label><input id="cc-scan-inc" type="checkbox"' + (cycleScanAutoInc ? ' checked' : '') + ' /> Tambah +1 fisik otomatis saat scan</label>' +
       '</div>' +
       (isClosed ? '<div class="inline-alert warn">Sesi tanggal ' + esc(activeSession.tgl) + ' sudah ditutup Admin. Minta Admin membuka kembali sesi jika masih ada perubahan hitungan.</div>' : '') +
@@ -471,7 +471,7 @@ export function renderCycleCount(root, d, an) {
           '<button type="button" class="cc-step-btn" data-cc-step="1" data-id="' + esc(r.id) + '"' + (isClosed ? ' disabled' : '') + '>+1</button>' +
           '</div>' +
           '<input type="text" class="input cc-note-inp" data-id="' + esc(r.id) + '" value="' + esc(r.catatan || '') + '" placeholder="Catatan temuan lapangan (opsional)…"' + (isClosed ? ' readonly' : '') + ' />' +
-          '<div style="display:flex;gap:8px;justify-content:space-between;align-items:center">' +
+          '<div class="cc-card-foot">' +
           (!isBlind && !isClosed ? '<button type="button" class="btn btn-sm" data-cc-match="' + esc(r.id) + '" data-wms="' + esc(r.stokWms) + '">Sesuai WMS (' + fmtNum(r.stokWms) + ')</button>' : '<span class="muted" style="font-size:12px">' + (r.countedBy ? ('Oleh ' + esc(r.countedBy) + (r.countedAt ? ' · ' + esc(r.countedAt) : '')) : '') + '</span>') +
           '<button type="button" class="btn btn-primary btn-sm" data-cc-save="' + esc(r.id) + '"' + (isClosed ? ' disabled' : '') + '>Simpan Hitungan</button>' +
           '</div>' +

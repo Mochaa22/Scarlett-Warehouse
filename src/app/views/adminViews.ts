@@ -27,7 +27,7 @@ export function renderKelolaGudang(root) {
   whStats.forEach(function (ws) {
     var isCur = ws.meta.id === appState.W.cur;
     html += '<tr>' +
-      '<td><input type="text" class="input wh-rename-inp" data-wh-id="' + esc(ws.meta.id) + '" value="' + esc(ws.meta.nama) + '" style="max-width:260px" /></td>' +
+      '<td><input type="text" class="input wh-rename-inp" data-wh-id="' + esc(ws.meta.id) + '" value="' + esc(ws.meta.nama) + '" /></td>' +
       '<td>' + (isCur ? '<span class="badge badge-ok">Aktif</span>' : '<button type="button" class="btn btn-sm" data-wh-activate="' + esc(ws.meta.id) + '">Aktifkan</button>') + '</td>' +
       '<td class="right num">' + fmtNum(ws.stats.skuAktif) + '</td>' +
       '<td class="right num">' + fmtNum(ws.stats.totalPcs) + '</td>' +

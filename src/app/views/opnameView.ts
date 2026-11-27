@@ -25,7 +25,7 @@ export function renderOpname(root, d, an) {
     '<div class="field"><button type="button" class="btn btn-primary" id="op-apply-btn">Terapkan penyesuaian</button></div>' +
     '</div>' +
     '<div class="scanner-bar" style="margin-top:12px;margin-bottom:0">' +
-    '<div class="scan-row" style="flex:1;min-width:210px"><input id="op-scan-inp" type="text" class="input mono" placeholder="Scan barcode produk di lokasi ini…" autocapitalize="characters" enterkeyhint="search" autocomplete="off" /><button type="button" class="btn" id="op-cam-btn">Kamera</button></div>' +
+    '<div class="scan-row"><input id="op-scan-inp" type="text" class="input mono" placeholder="Scan barcode produk di lokasi ini…" autocapitalize="characters" enterkeyhint="search" autocomplete="off" /><button type="button" class="btn" id="op-cam-btn">Kamera</button></div>' +
     '<label><input id="op-scan-inc" type="checkbox" /> Tambah +1 fisik otomatis saat scan</label>' +
     '</div></div>';
 

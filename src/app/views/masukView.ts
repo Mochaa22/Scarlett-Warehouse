@@ -91,7 +91,7 @@ export function renderMasuk(root, d) {
   html += '<div class="card"><div class="card-header"><h2 class="card-title">Riwayat Input Stockkeeper</h2><span class="muted" style="font-size:12px">Klik Edit jika ada salah input (' + shownSk.length + '/' + rowsSk.length + ' baris · ' + esc(masukPeriodLabel) + ')</span></div>' +
     '<div class="toolbar">' +
     '<div class="search-wrap"><input id="search-masuk" type="search" class="input" placeholder="Cari stockkeeper, barcode, produk, lokasi…" value="' + esc(appState.searchState.masuk) + '" /><span class="search-kbd">/</span></div>' +
-    '<select id="masuk-period-filt" class="input" style="max-width:170px" aria-label="Filter Periode Barang Masuk">' +
+    '<select id="masuk-period-filt" class="input filter-select" aria-label="Filter Periode Barang Masuk">' +
     '<option value="all"' + (appState.masukPeriod === 'all' ? ' selected' : '') + '>Semua Waktu</option>' +
     '<option value="month"' + (appState.masukPeriod === 'month' ? ' selected' : '') + '>Bulan Ini</option>' +
     '<option value="today"' + (appState.masukPeriod === 'today' ? ' selected' : '') + '>Hari Ini</option>' +
@@ -100,10 +100,10 @@ export function renderMasuk(root, d) {
     '<option value="custom"' + (appState.masukPeriod === 'custom' ? ' selected' : '') + '>Rentang Tanggal</option>' +
     '</select>' +
     (appState.masukPeriod === 'custom'
-      ? '<input id="masuk-from" type="date" class="input" style="max-width:155px" value="' + esc(appState.masukFrom || '') + '" aria-label="Dari tanggal" />' +
-        '<input id="masuk-to" type="date" class="input" style="max-width:155px" value="' + esc(appState.masukTo || '') + '" aria-label="Sampai tanggal" />'
+      ? '<input id="masuk-from" type="date" class="input filter-date" value="' + esc(appState.masukFrom || '') + '" aria-label="Dari tanggal" />' +
+        '<input id="masuk-to" type="date" class="input filter-date" value="' + esc(appState.masukTo || '') + '" aria-label="Sampai tanggal" />'
       : '') +
-    '<select id="masuk-status-filt" class="input" style="max-width:160px" aria-label="Filter Status Ancantho">' +
+    '<select id="masuk-status-filt" class="input filter-select" aria-label="Filter Status Ancantho">' +
     '<option value="all"' + (appState.masukStatus === 'all' ? ' selected' : '') + '>Semua Status</option>' +
     '<option value="pending"' + (appState.masukStatus === 'pending' ? ' selected' : '') + '>Menunggu Admin</option>' +
     '<option value="done"' + (appState.masukStatus === 'done' ? ' selected' : '') + '>Sudah Done</option>' +

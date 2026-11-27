@@ -203,7 +203,7 @@ body.auth-locked .login-gate {
   transform: translateY(0);
 }
 
-@media (max-width: 520px) {
+@media (max-width: 640px) {
   .login-gate {
     padding: 16px;
     align-items: center;
@@ -212,13 +212,22 @@ body.auth-locked .login-gate {
     border-radius: 16px;
   }
   .login-showcase {
-    padding: 22px 22px 18px;
+    padding: 20px 20px 16px;
   }
   .login-form-pane {
-    padding: 22px;
+    padding: 20px;
   }
   .login-form-head {
     margin-bottom: 16px;
+  }
+  .login-gate .input {
+    font-size: 16px;
+  }
+  .login-brand {
+    min-width: 0;
+  }
+  .login-brand-title {
+    font-size: 17px;
   }
 }
 
