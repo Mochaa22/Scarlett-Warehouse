@@ -465,11 +465,13 @@ export function renderPengaturan(root, d) {
     var hasGoogleCloud = appState.sharedSyncState.storageMode === 'firestore';
     var storageLabel = appState.sharedSyncState.storageMode === 'firestore'
       ? 'Firebase Firestore (Cloud Persisten & Sinkron Real-Time)'
-      : (appState.sharedSyncState.storageMode === 'redis'
-          ? 'Redis / Vercel KV (Sinkron Lintas Perangkat)'
-          : (appState.sharedSyncState.storageMode === 'ephemeral'
-              ? 'Penyimpanan Server Sementara + Perangkat'
-              : 'File Server Persisten (Sinkron Lintas Perangkat)'));
+      : (appState.sharedSyncState.storageMode === 'postgres'
+          ? 'Neon PostgreSQL (Database Cloud Persisten)'
+          : (appState.sharedSyncState.storageMode === 'redis'
+              ? 'Redis / Vercel KV (Sinkron Lintas Perangkat)'
+              : (appState.sharedSyncState.storageMode === 'ephemeral'
+                  ? 'Penyimpanan Server Sementara + Perangkat'
+                  : 'File Server Persisten (Sinkron Lintas Perangkat)')));
 
     html += '<div class="grid-2">' +
       '<div class="card"><div class="card-header"><h2 class="card-title">Sesi Login &amp; Hak Akses</h2>' +

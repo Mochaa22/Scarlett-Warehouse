@@ -3,10 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type RequestHandler, type Response } from 'express';
 import { z } from 'zod';
+import { getPostgresFallbackSeed, hasPostgresConfig, pgGetJson, pgSetJson, pgSetNxJson } from './_postgres.js';
 
 type AppRole = 'admin' | 'super_admin';
 type AppAuthRole = 'stockkeeper' | AppRole;
-export type StorageMode = 'redis' | 'file' | 'ephemeral';
+export type StorageMode = 'postgres' | 'redis' | 'file' | 'ephemeral';
 
 interface StoredPinRecord {
   adminHash: string;
@@ -138,6 +139,7 @@ function getKvConfig(): { url: string; token: string } | null {
 }
 
 function getStorageMode(): StorageMode {
+  if (hasPostgresConfig()) return 'postgres';
   if (getKvConfig()) return 'redis';
   if (process.env.VERCEL) return 'ephemeral';
   return 'file';
@@ -145,7 +147,7 @@ function getStorageMode(): StorageMode {
 
 function hasStrongSessionSecret(): boolean {
   const configured = String(process.env.PIN_SESSION_SECRET || process.env.SESSION_SECRET || '').trim();
-  return configured.length >= 16 || Boolean(getKvConfig());
+  return configured.length >= 16 || hasPostgresConfig() || Boolean(getKvConfig());
 }
 
 async function kvGetJson<T>(key: string): Promise<{ hit: boolean; value: T | null }> {
@@ -221,7 +223,35 @@ async function getSessionSecretAsync(): Promise<Buffer> {
   }
   if (cachedSessionSecret) return cachedSessionSecret;
 
-  // 1. Jika Redis/Vercel KV terhubung, gunakan secret persisten bersama di Redis agar semua lambda Vercel konsisten
+  // 1. Jika Neon/PostgreSQL terhubung, gunakan secret persisten bersama di Postgres
+  if (hasPostgresConfig()) {
+    const existingPg = await pgGetJson<{ hex?: string }>('sgp:system:session_secret');
+    if (existingPg.hit && existingPg.value && typeof existingPg.value.hex === 'string' && /^[0-9a-f]{64}$/i.test(existingPg.value.hex)) {
+      cachedSessionSecret = Buffer.from(existingPg.value.hex, 'hex');
+      return cachedSessionSecret;
+    }
+    if (existingPg.hit) {
+      const candidateHex = crypto.randomBytes(32).toString('hex');
+      await pgSetNxJson('sgp:system:session_secret', { hex: candidateHex });
+      const confirmPg = await pgGetJson<{ hex?: string }>('sgp:system:session_secret');
+      if (confirmPg.hit && confirmPg.value && typeof confirmPg.value.hex === 'string' && /^[0-9a-f]{64}$/i.test(confirmPg.value.hex)) {
+        cachedSessionSecret = Buffer.from(confirmPg.value.hex, 'hex');
+        return cachedSessionSecret;
+      }
+      await pgSetJson('sgp:system:session_secret', { hex: candidateHex });
+      cachedSessionSecret = Buffer.from(candidateHex, 'hex');
+      return cachedSessionSecret;
+    }
+    const pgSeed = getPostgresFallbackSeed();
+    if (pgSeed) {
+      return crypto
+        .createHmac('sha256', pgSeed)
+        .update('scarlett-warehouse-pg-fallback-v1')
+        .digest();
+    }
+  }
+
+  // 2. Jika Redis/Vercel KV terhubung, gunakan secret persisten bersama di Redis agar semua lambda Vercel konsisten
   const kvCfg = getKvConfig();
   if (kvCfg) {
     let existingKv = await kvGetJson<{ hex?: string }>('sgp:system:session_secret');
@@ -335,6 +365,28 @@ function getEnvPins(): { adminPin: string; superAdminPin: string } | null {
 }
 
 async function readStoredPins(): Promise<StoredPinRecord | null> {
+  if (hasPostgresConfig()) {
+    const pgRes = await pgGetJson<Partial<StoredPinRecord>>('sgp:pin:config');
+    if (pgRes.hit) {
+      const parsed = pgRes.value;
+      if (
+        parsed &&
+        typeof parsed.adminHash === 'string' &&
+        typeof parsed.superAdminHash === 'string' &&
+        parsed.adminHash.includes(':') &&
+        parsed.superAdminHash.includes(':')
+      ) {
+        memoryPinStore = {
+          adminHash: parsed.adminHash,
+          superAdminHash: parsed.superAdminHash,
+          updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
+        };
+        return memoryPinStore;
+      }
+      memoryPinStore = null;
+      return null;
+    }
+  }
   if (getKvConfig()) {
     const kvRes = await kvGetJson<Partial<StoredPinRecord>>('sgp:pin:config');
     if (kvRes.hit) {
@@ -377,10 +429,18 @@ async function readStoredPins(): Promise<StoredPinRecord | null> {
 }
 
 async function writeStoredPins(record: StoredPinRecord): Promise<void> {
-  memoryPinStore = record;
-  if (getKvConfig()) {
-    await kvSetJson('sgp:pin:config', record);
+  if (hasPostgresConfig()) {
+    const ok = await pgSetJson('sgp:pin:config', record);
+    if (!ok) {
+      throw new Error('Gagal menyimpan PIN ke database PostgreSQL. Silakan coba lagi.');
+    }
+  } else if (getKvConfig()) {
+    const ok = await kvSetJson('sgp:pin:config', record);
+    if (!ok) {
+      throw new Error('Gagal menyimpan PIN ke Redis / KV. Silakan coba lagi.');
+    }
   }
+  memoryPinStore = record;
   writeJsonToPaths('pin-config.json', 'sgp-pin-config.json', record);
 }
 
@@ -418,6 +478,28 @@ function getEnvUsers(): EnvOperatorUser[] {
 }
 
 async function readStoredAuth(): Promise<StoredAuthRecord | null> {
+  if (hasPostgresConfig()) {
+    const pgRes = await pgGetJson<Partial<StoredAuthRecord>>('sgp:auth:primary');
+    if (pgRes.hit) {
+      const parsed = pgRes.value;
+      if (
+        parsed &&
+        typeof parsed.email === 'string' &&
+        parsed.email.includes('@') &&
+        typeof parsed.passwordHash === 'string' &&
+        parsed.passwordHash.includes(':')
+      ) {
+        memoryAuthStore = {
+          email: parsed.email.trim().toLowerCase(),
+          passwordHash: parsed.passwordHash,
+          updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
+        };
+        return memoryAuthStore;
+      }
+      memoryAuthStore = null;
+      return null;
+    }
+  }
   if (getKvConfig()) {
     const kvRes = await kvGetJson<Partial<StoredAuthRecord>>('sgp:auth:primary');
     if (kvRes.hit) {
@@ -460,10 +542,18 @@ async function readStoredAuth(): Promise<StoredAuthRecord | null> {
 }
 
 async function writeStoredAuth(record: StoredAuthRecord): Promise<void> {
-  memoryAuthStore = record;
-  if (getKvConfig()) {
-    await kvSetJson('sgp:auth:primary', record);
+  if (hasPostgresConfig()) {
+    const ok = await pgSetJson('sgp:auth:primary', record);
+    if (!ok) {
+      throw new Error('Gagal menyimpan akun ke database PostgreSQL. Silakan coba lagi.');
+    }
+  } else if (getKvConfig()) {
+    const ok = await kvSetJson('sgp:auth:primary', record);
+    if (!ok) {
+      throw new Error('Gagal menyimpan akun ke Redis / KV. Silakan coba lagi.');
+    }
   }
+  memoryAuthStore = record;
   writeJsonToPaths('auth-config.json', 'sgp-auth-config.json', record);
 }
 
@@ -491,6 +581,14 @@ function sanitizeOperatorUsers(raw: unknown): StoredOperatorUser[] {
 }
 
 async function readOperatorUsers(): Promise<StoredOperatorUser[]> {
+  if (hasPostgresConfig()) {
+    const pgRes = await pgGetJson<unknown>('sgp:auth:users');
+    if (pgRes.hit) {
+      const cleaned = sanitizeOperatorUsers(pgRes.value);
+      memoryOperatorUsers = cleaned;
+      return cleaned;
+    }
+  }
   if (getKvConfig()) {
     const kvRes = await kvGetJson<unknown>('sgp:auth:users');
     if (kvRes.hit) {
@@ -507,10 +605,18 @@ async function readOperatorUsers(): Promise<StoredOperatorUser[]> {
 }
 
 async function writeOperatorUsers(users: StoredOperatorUser[]): Promise<void> {
-  memoryOperatorUsers = users;
-  if (getKvConfig()) {
-    await kvSetJson('sgp:auth:users', users);
+  if (hasPostgresConfig()) {
+    const ok = await pgSetJson('sgp:auth:users', users);
+    if (!ok) {
+      throw new Error('Gagal menyimpan daftar operator ke database PostgreSQL.');
+    }
+  } else if (getKvConfig()) {
+    const ok = await kvSetJson('sgp:auth:users', users);
+    if (!ok) {
+      throw new Error('Gagal menyimpan daftar operator ke Redis / KV.');
+    }
   }
+  memoryOperatorUsers = users;
   writeJsonToPaths('operator-users.json', 'sgp-operator-users.json', users);
 }
 
@@ -549,6 +655,15 @@ function sanitizeWarehouseState(raw: unknown): SharedWarehouseState {
 }
 
 async function readSharedWarehouseState(): Promise<SharedWarehouseState> {
+  if (hasPostgresConfig()) {
+    const pgRes = await pgGetJson<unknown>('sgp:warehouse:state');
+    if (!pgRes.hit) {
+      throw new Error('Koneksi ke database PostgreSQL sedang bermasalah. Coba beberapa saat lagi.');
+    }
+    const cleaned = sanitizeWarehouseState(pgRes.value);
+    memoryWarehouseState = cleaned;
+    return cleaned;
+  }
   if (getKvConfig()) {
     const kvRes = await kvGetJson<unknown>('sgp:warehouse:state');
     if (kvRes.hit) {
@@ -565,10 +680,18 @@ async function readSharedWarehouseState(): Promise<SharedWarehouseState> {
 }
 
 async function writeSharedWarehouseState(state: SharedWarehouseState): Promise<void> {
-  memoryWarehouseState = state;
-  if (getKvConfig()) {
-    await kvSetJson('sgp:warehouse:state', state);
+  if (hasPostgresConfig()) {
+    const ok = await pgSetJson('sgp:warehouse:state', state);
+    if (!ok) {
+      throw new Error('Gagal menyimpan data gudang ke database PostgreSQL.');
+    }
+  } else if (getKvConfig()) {
+    const ok = await kvSetJson('sgp:warehouse:state', state);
+    if (!ok) {
+      throw new Error('Gagal menyimpan data gudang ke Redis / KV.');
+    }
   }
+  memoryWarehouseState = state;
   writeJsonToPaths('warehouse-state.json', 'sgp-warehouse-state.json', state);
 }
 

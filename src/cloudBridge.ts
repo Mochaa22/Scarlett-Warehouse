@@ -18,7 +18,7 @@ import {
   type CloudWarehouseSnapshot,
 } from './firestoreSync.ts';
 
-export type StorageMode = 'firestore' | 'redis' | 'file' | 'ephemeral';
+export type StorageMode = 'firestore' | 'postgres' | 'redis' | 'file' | 'ephemeral';
 
 export interface OperatorUserInfo {
   email: string;

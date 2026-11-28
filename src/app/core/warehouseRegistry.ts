@@ -415,6 +415,10 @@ export async function pushSharedWarehouseState(forceInitialPush?: boolean) {
       appState.appAuthToken || null
     );
 
+    var targetLabel = appState.sharedSyncState.storageMode === 'firestore'
+      ? 'Firebase'
+      : (appState.sharedSyncState.storageMode === 'postgres' ? 'Neon PostgreSQL' : 'server');
+
     if (res && res.ok) {
       appState.sharedSyncState.revision = Number(res.revision || 0);
       appState.sharedSyncState.snapshot = cloneJsonSafe(localSnap);
@@ -423,17 +427,20 @@ export async function pushSharedWarehouseState(forceInitialPush?: boolean) {
       appState.sharedSyncState.retryDelayMs = 2000;
       appState.sharedSyncState.lastError = '';
       if (res.storageMode) appState.sharedSyncState.storageMode = res.storageMode;
+      targetLabel = appState.sharedSyncState.storageMode === 'firestore'
+        ? 'Firebase'
+        : (appState.sharedSyncState.storageMode === 'postgres' ? 'Neon PostgreSQL' : 'server');
       saveSyncPersistence(true);
       refreshRealtimeSubscription();
       if (appState.sharedSyncState.offlineNotified && hadPendingBefore) {
         appState.sharedSyncState.offlineNotified = false;
-        showToast('Koneksi kembali stabil — seluruh perubahan tertunda berhasil tersimpan ke Firebase.', 'ok');
+        showToast('Koneksi kembali stabil — seluruh perubahan tertunda berhasil tersimpan ke ' + targetLabel + '.', 'ok');
       } else {
         appState.sharedSyncState.offlineNotified = false;
       }
     }
   } catch (err) {
-    var msg = (err && err.message) || 'Gagal menyinkronkan ke Firebase';
+    var msg = (err && err.message) || 'Gagal menyinkronkan ke server';
     appState.sharedSyncState.lastError = msg;
     if (err && err.status === 401) {
       appState.sharedSyncState.pending = true;
@@ -447,7 +454,7 @@ export async function pushSharedWarehouseState(forceInitialPush?: boolean) {
       scheduleSharedSyncRetry();
       if (!appState.sharedSyncState.offlineNotified) {
         appState.sharedSyncState.offlineNotified = true;
-        showToast('Sinkronisasi Firebase tertunda — data tetap aman dan akan dikirim ulang otomatis.', 'warn');
+        showToast('Sinkronisasi tertunda — data tetap aman dan akan dikirim ulang otomatis.', 'warn');
       }
     }
   } finally {
@@ -473,7 +480,10 @@ export async function pullSharedWarehouseState(isInitialOrManual?: boolean | str
     if (isInitialOrManual === 'manual') {
       await pushSharedWarehouseState();
       if (!appState.sharedSyncState.pending) {
-        showToast('Perubahan tertunda berhasil disimpan ke Firebase', 'ok');
+        var manualLabel = appState.sharedSyncState.storageMode === 'firestore'
+          ? 'Firebase'
+          : (appState.sharedSyncState.storageMode === 'postgres' ? 'Neon PostgreSQL' : 'server');
+        showToast('Perubahan tertunda berhasil disimpan ke ' + manualLabel, 'ok');
       }
     } else if (!appState.sharedSyncState.inFlight && !appState.sharedSyncState.pushTimer && !appState.sharedSyncState.retryTimer) {
       void pushSharedWarehouseState();
@@ -498,7 +508,9 @@ export async function pullSharedWarehouseState(isInitialOrManual?: boolean | str
       return;
     }
 
-    var targetCloudLabel = appState.sharedSyncState.storageMode === 'firestore' ? 'Firebase' : 'server';
+    var targetCloudLabel = appState.sharedSyncState.storageMode === 'firestore'
+      ? 'Firebase'
+      : (appState.sharedSyncState.storageMode === 'postgres' ? 'Neon PostgreSQL' : 'server');
     var hasRemoteWarehouses = Array.isArray(res.warehousesMeta) && res.warehousesMeta.length > 0;
     if (!hasRemoteWarehouses) {
       var localSnap = buildSharedSnapshotFromLocal();
