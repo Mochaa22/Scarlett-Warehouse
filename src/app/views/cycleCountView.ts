@@ -968,7 +968,12 @@ export function renderCycleCount(root, d, an) {
         return;
       }
       var qty = parseQty(sVal);
-      var noteEl = root.querySelector('.cc-note-inp[data-id="' + itemId + '"]');
+      if (qty < 0) {
+        showToast('Stok fisik tidak boleh bernilai negatif', 'warn');
+        return;
+      }
+      var safeId = CSS.escape(String(itemId || ''));
+      var noteEl = root.querySelector('.cc-note-inp[data-id="' + safeId + '"]');
       var noteVal = noteEl ? noteEl.value.trim() : '';
 
       var dNow = curData();
@@ -995,7 +1000,7 @@ export function renderCycleCount(root, d, an) {
       b.addEventListener('click', function () {
         var id = b.getAttribute('data-id');
         var delta = Number(b.getAttribute('data-cc-step'));
-        var inp = root.querySelector('.cc-fisik-inp[data-id="' + id + '"]');
+        var inp = root.querySelector('.cc-fisik-inp[data-id="' + CSS.escape(String(id || '')) + '"]');
         if (!inp) return;
         var cur = inp.value.trim() === '' ? 0 : parseQty(inp.value);
         inp.value = Math.max(0, cur + delta);
@@ -1013,7 +1018,7 @@ export function renderCycleCount(root, d, an) {
     root.querySelectorAll('[data-cc-save]').forEach(function (b) {
       b.addEventListener('click', function () {
         var id = b.getAttribute('data-cc-save');
-        var inp = root.querySelector('.cc-fisik-inp[data-id="' + id + '"]');
+        var inp = root.querySelector('.cc-fisik-inp[data-id="' + CSS.escape(String(id || '')) + '"]');
         saveFieldCount(id, inp ? inp.value : '', false);
       });
     });

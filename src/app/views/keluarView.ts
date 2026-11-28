@@ -821,8 +821,9 @@ export function renderKeluar(root, d, an) {
   function saveKeluarAdminRow(id, nextDone, onlyUpdateFields) {
     if (getEffectiveRole() === 'stockkeeper') return;
 
-    var byInp = root.querySelector('[data-kadmin-by="' + id + '"]');
-    var ketInp = root.querySelector('[data-kadmin-ket="' + id + '"]');
+    var safeId = CSS.escape(String(id || ''));
+    var byInp = root.querySelector('[data-kadmin-by="' + safeId + '"]');
+    var ketInp = root.querySelector('[data-kadmin-ket="' + safeId + '"]');
     var adminField = byId('out-admin-name');
     var cloudUser = window.__sgpCloud && window.__sgpCloud.getUser && window.__sgpCloud.getUser();
     var rowAdmin = byInp ? byInp.value.trim() : '';

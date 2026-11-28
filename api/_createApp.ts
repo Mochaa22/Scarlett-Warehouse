@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type RequestHandler, type Response } from 'express';
 import { z } from 'zod';
-import { getPostgresFallbackSeed, hasPostgresConfig, pgGetJson, pgSetJson, pgSetNxJson } from './_postgres.js';
+import { getPostgresFallbackSeed, hasPostgresConfig, pgCasWarehouseState, pgGetJson, pgSetJson, pgSetNxJson } from './_postgres.js';
 
 type AppRole = 'admin' | 'super_admin';
 type AppAuthRole = 'stockkeeper' | AppRole;
@@ -61,6 +61,7 @@ interface AppAuthSessionPayload {
   iat: number;
   exp: number;
   remember?: boolean;
+  pwv?: string;
 }
 
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -68,6 +69,7 @@ const DEVICE_SESSION_TTL_MS = 180 * 24 * 60 * 60 * 1000;
 const SLIDING_RENEWAL_INTERVAL_MS = 60 * 60 * 1000;
 const RATE_WINDOW_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 10;
+const MAX_RATE_ENTRIES = 5000;
 
 let cachedSessionSecret: Buffer | null = null;
 const ephemSessionSecret = crypto.randomBytes(32);
@@ -444,6 +446,26 @@ async function writeStoredPins(record: StoredPinRecord): Promise<void> {
   writeJsonToPaths('pin-config.json', 'sgp-pin-config.json', record);
 }
 
+async function writeStoredPinsIfAbsent(record: StoredPinRecord): Promise<boolean> {
+  if (hasPostgresConfig()) {
+    const existing = await pgGetJson<Partial<StoredPinRecord>>('sgp:pin:config');
+    if (!existing.hit) {
+      throw new Error('Koneksi ke database PostgreSQL sedang bermasalah. Silakan coba lagi.');
+    }
+    if (existing.value) return false;
+    const claimed = await pgSetNxJson('sgp:pin:config', record);
+    if (!claimed) return false;
+  } else if (getKvConfig()) {
+    const claimed = await kvSetNxJson('sgp:pin:config', record);
+    if (!claimed) return false;
+  } else if (memoryPinStore || readJsonFromPaths<Partial<StoredPinRecord>>('pin-config.json', 'sgp-pin-config.json')) {
+    return false;
+  }
+  memoryPinStore = record;
+  writeJsonToPaths('pin-config.json', 'sgp-pin-config.json', record);
+  return true;
+}
+
 function getEnvAuth(): { email: string; password: string } | null {
   const email = String(process.env.APP_LOGIN_EMAIL || '').trim().toLowerCase();
   const password = String(process.env.APP_LOGIN_PASSWORD || '').replace(/[\r\n]+/g, '');
@@ -541,20 +563,24 @@ async function readStoredAuth(): Promise<StoredAuthRecord | null> {
   return null;
 }
 
-async function writeStoredAuth(record: StoredAuthRecord): Promise<void> {
+async function writeStoredAuthIfAbsent(record: StoredAuthRecord): Promise<boolean> {
   if (hasPostgresConfig()) {
-    const ok = await pgSetJson('sgp:auth:primary', record);
-    if (!ok) {
-      throw new Error('Gagal menyimpan akun ke database PostgreSQL. Silakan coba lagi.');
+    const existing = await pgGetJson<Partial<StoredAuthRecord>>('sgp:auth:primary');
+    if (!existing.hit) {
+      throw new Error('Koneksi ke database PostgreSQL sedang bermasalah. Silakan coba lagi.');
     }
+    if (existing.value) return false;
+    const claimed = await pgSetNxJson('sgp:auth:primary', record);
+    if (!claimed) return false;
   } else if (getKvConfig()) {
-    const ok = await kvSetJson('sgp:auth:primary', record);
-    if (!ok) {
-      throw new Error('Gagal menyimpan akun ke Redis / KV. Silakan coba lagi.');
-    }
+    const claimed = await kvSetNxJson('sgp:auth:primary', record);
+    if (!claimed) return false;
+  } else if (memoryAuthStore || readJsonFromPaths<Partial<StoredAuthRecord>>('auth-config.json', 'sgp-auth-config.json')) {
+    return false;
   }
   memoryAuthStore = record;
   writeJsonToPaths('auth-config.json', 'sgp-auth-config.json', record);
+  return true;
 }
 
 function sanitizeOperatorUsers(raw: unknown): StoredOperatorUser[] {
@@ -695,6 +721,24 @@ async function writeSharedWarehouseState(state: SharedWarehouseState): Promise<v
   writeJsonToPaths('warehouse-state.json', 'sgp-warehouse-state.json', state);
 }
 
+async function writeSharedWarehouseStateCas(
+  expectedRevision: number,
+  state: SharedWarehouseState
+): Promise<{ conflict: boolean }> {
+  if (hasPostgresConfig()) {
+    const cas = await pgCasWarehouseState('sgp:warehouse:state', expectedRevision, state);
+    if (cas.conflict) return { conflict: true };
+    if (!cas.ok) {
+      throw new Error('Gagal menyimpan data gudang ke database PostgreSQL.');
+    }
+    memoryWarehouseState = state;
+    writeJsonToPaths('warehouse-state.json', 'sgp-warehouse-state.json', state);
+    return { conflict: false };
+  }
+  await writeSharedWarehouseState(state);
+  return { conflict: false };
+}
+
 function hashSecret(secret: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
   const derived = crypto.scryptSync(secret, salt, 64).toString('hex');
@@ -756,11 +800,16 @@ function verifySessionToken(rawToken: string | null | undefined, secret: Buffer)
   }
 }
 
+function computePasswordVersion(credentialMaterial: string): string {
+  return crypto.createHash('sha256').update(`pwv:${credentialMaterial}`, 'utf8').digest('hex').slice(0, 16);
+}
+
 function issueAppAuthToken(
   email: string,
   role: AppAuthRole,
   secret: Buffer,
-  rememberDevice = true
+  rememberDevice = true,
+  pwv = ''
 ): { token: string; email: string; role: AppAuthRole; expiresAt: number; rememberDevice: boolean } {
   const now = Date.now();
   const ttl = rememberDevice ? DEVICE_SESSION_TTL_MS : SESSION_TTL_MS;
@@ -770,6 +819,7 @@ function issueAppAuthToken(
     iat: now,
     exp: now + ttl,
     remember: rememberDevice,
+    ...(pwv ? { pwv } : {}),
   };
   const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
   const sig = crypto.createHmac('sha256', secret).update(`app:${body}`).digest('base64url');
@@ -885,15 +935,17 @@ function hasExplicitAuthOrCustomHeader(req: Request): boolean {
 }
 
 function isOriginSafeForCookieMutation(req: Request): boolean {
-  if (hasExplicitAuthOrCustomHeader(req)) return true;
   const origin = String(req.headers.origin || '').trim();
   const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
-  if (!origin || !host) return true;
-  try {
-    return new URL(origin).host.toLowerCase() === host;
-  } catch {
-    return false;
+  if (origin && host) {
+    try {
+      return new URL(origin).host.toLowerCase() === host;
+    } catch {
+      return false;
+    }
   }
+  if (hasExplicitAuthOrCustomHeader(req)) return true;
+  return !origin;
 }
 
 function extractValidAppAuthSession(req: Request, secret: Buffer): AppAuthSessionPayload | null {
@@ -922,29 +974,64 @@ async function getConfiguredAccountsInfo(): Promise<{
   configured: boolean;
   envManaged: boolean;
   activeEmails: Set<string>;
+  activeVersions: Map<string, string>;
 }> {
   const envAuth = getEnvAuth();
   const envUsers = getEnvUsers();
   const [storedAuth, operatorUsers] = await Promise.all([readStoredAuth(), readOperatorUsers()]);
   const activeEmails = new Set<string>();
-  if (envAuth) activeEmails.add(envAuth.email.toLowerCase());
-  for (const u of envUsers) activeEmails.add(u.email.toLowerCase());
-  if (storedAuth) activeEmails.add(storedAuth.email.toLowerCase());
-  for (const u of operatorUsers) activeEmails.add(u.email.toLowerCase());
+  const activeVersions = new Map<string, string>();
+  if (envAuth) {
+    const em = envAuth.email.toLowerCase();
+    activeEmails.add(em);
+    activeVersions.set(em, computePasswordVersion(envAuth.password));
+  }
+  for (const u of envUsers) {
+    const em = u.email.toLowerCase();
+    activeEmails.add(em);
+    if (!activeVersions.has(em)) {
+      activeVersions.set(em, computePasswordVersion(u.password));
+    }
+  }
+  if (storedAuth) {
+    const em = storedAuth.email.toLowerCase();
+    activeEmails.add(em);
+    if (!activeVersions.has(em)) {
+      activeVersions.set(em, computePasswordVersion(storedAuth.passwordHash));
+    }
+  }
+  for (const u of operatorUsers) {
+    const em = u.email.toLowerCase();
+    activeEmails.add(em);
+    if (!activeVersions.has(em)) {
+      activeVersions.set(em, computePasswordVersion(u.passwordHash));
+    }
+  }
   return {
     configured: activeEmails.size > 0,
     envManaged: Boolean(envAuth),
     activeEmails,
+    activeVersions,
   };
+}
+
+function isSessionActiveForAccounts(
+  rawSession: AppAuthSessionPayload | null,
+  accounts: { configured: boolean; activeEmails: Set<string>; activeVersions: Map<string, string> }
+): AppAuthSessionPayload | null {
+  if (!rawSession) return null;
+  if (!accounts.configured) return rawSession;
+  const emailLower = rawSession.sub.toLowerCase();
+  if (!accounts.activeEmails.has(emailLower)) return null;
+  const expectedPwv = accounts.activeVersions.get(emailLower);
+  if (expectedPwv && rawSession.pwv !== expectedPwv) return null;
+  return rawSession;
 }
 
 async function getAppAuthSessionIfAllowed(req: Request): Promise<{ satisfied: boolean; session: AppAuthSessionPayload | null }> {
   const [accounts, secret] = await Promise.all([getConfiguredAccountsInfo(), getSessionSecretAsync()]);
   const rawSession = extractValidAppAuthSession(req, secret);
-  const activeSession =
-    rawSession && (!accounts.configured || accounts.activeEmails.has(rawSession.sub.toLowerCase()))
-      ? rawSession
-      : null;
+  const activeSession = isSessionActiveForAccounts(rawSession, accounts);
   if (!accounts.configured) {
     return { satisfied: true, session: activeSession };
   }
@@ -955,8 +1042,21 @@ async function getAppAuthSessionIfAllowed(req: Request): Promise<{ satisfied: bo
 }
 
 function getClientKey(req: Request): string {
-  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  return forwarded || req.ip || 'unknown';
+  const realIp = typeof req.headers['x-real-ip'] === 'string' ? req.headers['x-real-ip'].trim() : '';
+  return req.ip || realIp || req.socket?.remoteAddress || 'unknown';
+}
+
+function pruneFailedAttempts(now: number): void {
+  for (const [k, entry] of failedAttempts.entries()) {
+    if (now > entry.resetAt) {
+      failedAttempts.delete(k);
+    }
+  }
+  while (failedAttempts.size >= MAX_RATE_ENTRIES) {
+    const oldestKey = failedAttempts.keys().next().value;
+    if (oldestKey === undefined) break;
+    failedAttempts.delete(oldestKey);
+  }
 }
 
 function isRateLimited(key: string): boolean {
@@ -974,6 +1074,9 @@ function recordFailure(key: string): void {
   const now = Date.now();
   const entry = failedAttempts.get(key);
   if (!entry || now > entry.resetAt) {
+    if (failedAttempts.size >= MAX_RATE_ENTRIES) {
+      pruneFailedAttempts(now);
+    }
     failedAttempts.set(key, { count: 1, resetAt: now + RATE_WINDOW_MS });
   } else {
     entry.count += 1;
@@ -1112,17 +1215,15 @@ export function createApp() {
     asyncHandler(async (req: Request, res: Response) => {
       const [accounts, secret] = await Promise.all([getConfiguredAccountsInfo(), getSessionSecretAsync()]);
       const rawSession = extractValidAppAuthSession(req, secret);
-      const session =
-        rawSession && (!accounts.configured || accounts.activeEmails.has(rawSession.sub.toLowerCase()))
-          ? rawSession
-          : null;
+      const session = isSessionActiveForAccounts(rawSession, accounts);
 
       let refreshedToken: string | null = null;
       const rememberDevice = session ? session.remember !== false : true;
       if (session && rememberDevice) {
         const shouldRenew = session.remember === undefined || Date.now() - session.iat > SLIDING_RENEWAL_INTERVAL_MS;
         if (shouldRenew) {
-          const issued = issueAppAuthToken(session.sub, session.role, secret, true);
+          const pwv = accounts.activeVersions.get(session.sub.toLowerCase()) || '';
+          const issued = issueAppAuthToken(session.sub, session.role, secret, true, pwv);
           refreshedToken = issued.token;
           setAuthCookie(res, req, issued.token, true);
         }
@@ -1145,18 +1246,17 @@ export function createApp() {
   app.post(
     '/api/auth/setup',
     asyncHandler(async (req: Request, res: Response) => {
+      if (!isOriginSafeForCookieMutation(req)) {
+        res.status(403).json({ error: 'Permintaan lintas origin tidak diizinkan.' });
+        return;
+      }
+
       const envAuth = getEnvAuth();
       if (envAuth) {
         res.status(409).json({
           error: 'Akun login dikelola melalui environment variable server (APP_LOGIN_EMAIL & APP_LOGIN_PASSWORD).',
           envManaged: true,
         });
-        return;
-      }
-
-      const existing = await readStoredAuth();
-      if (existing) {
-        res.status(409).json({ error: 'Akun login awal sudah dibuat. Silakan langsung masuk.' });
         return;
       }
 
@@ -1167,15 +1267,20 @@ export function createApp() {
       }
 
       const emailLower = parsed.data.email.trim().toLowerCase();
-      await writeStoredAuth({
+      const passwordHash = hashSecret(parsed.data.password);
+      const claimed = await writeStoredAuthIfAbsent({
         email: emailLower,
-        passwordHash: hashSecret(parsed.data.password),
+        passwordHash,
         updatedAt: new Date().toISOString(),
       });
+      if (!claimed) {
+        res.status(409).json({ error: 'Akun login awal sudah dibuat. Silakan langsung masuk.' });
+        return;
+      }
 
       const secret = await getSessionSecretAsync();
       const rememberDevice = parsed.data.rememberDevice !== false;
-      const issued = issueAppAuthToken(emailLower, 'stockkeeper', secret, rememberDevice);
+      const issued = issueAppAuthToken(emailLower, 'stockkeeper', secret, rememberDevice, computePasswordVersion(passwordHash));
       setAuthCookie(res, req, issued.token, rememberDevice);
       res.json(issued);
     })
@@ -1184,6 +1289,11 @@ export function createApp() {
   app.post(
     '/api/auth/login',
     asyncHandler(async (req: Request, res: Response) => {
+      if (!isOriginSafeForCookieMutation(req)) {
+        res.status(403).json({ error: 'Permintaan lintas origin tidak diizinkan.' });
+        return;
+      }
+
       const parsed = appLoginSchema.safeParse(req.body);
       if (!parsed.success) {
         res.status(400).json({ error: parsed.error.issues[0]?.message || 'Email atau password tidak valid.' });
@@ -1216,15 +1326,18 @@ export function createApp() {
       }
 
       let matchedEmail: string | null = null;
+      let matchedPwv = '';
 
       if (envAuth && verifyPlainSecret(emailLower, envAuth.email) && verifyPlainSecret(password, envAuth.password)) {
         matchedEmail = envAuth.email;
+        matchedPwv = computePasswordVersion(envAuth.password);
       }
 
       if (!matchedEmail) {
         for (const u of envUsers) {
           if (verifyPlainSecret(emailLower, u.email) && verifyPlainSecret(password, u.password)) {
             matchedEmail = u.email;
+            matchedPwv = computePasswordVersion(u.password);
             break;
           }
         }
@@ -1237,12 +1350,14 @@ export function createApp() {
         verifySecretHash(password, storedAuth.passwordHash)
       ) {
         matchedEmail = storedAuth.email;
+        matchedPwv = computePasswordVersion(storedAuth.passwordHash);
       }
 
       if (!matchedEmail) {
         for (const u of operatorUsers) {
           if (verifyPlainSecret(emailLower, u.email) && verifySecretHash(password, u.passwordHash)) {
             matchedEmail = u.email;
+            matchedPwv = computePasswordVersion(u.passwordHash);
             break;
           }
         }
@@ -1257,13 +1372,17 @@ export function createApp() {
       clearFailures(rateKey);
       const secret = await getSessionSecretAsync();
       const rememberDevice = parsed.data.rememberDevice !== false;
-      const issued = issueAppAuthToken(matchedEmail, 'stockkeeper', secret, rememberDevice);
+      const issued = issueAppAuthToken(matchedEmail, 'stockkeeper', secret, rememberDevice, matchedPwv);
       setAuthCookie(res, req, issued.token, rememberDevice);
       res.json(issued);
     })
   );
 
   app.post('/api/auth/logout', (req: Request, res: Response) => {
+    if (!isOriginSafeForCookieMutation(req)) {
+      res.status(403).json({ error: 'Permintaan lintas origin tidak diizinkan.' });
+      return;
+    }
     clearAuthCookie(res, req);
     res.json({ ok: true });
   });
@@ -1489,11 +1608,23 @@ export function createApp() {
         }
       }
 
-      await writeStoredPins({
+      const nextPinRecord: StoredPinRecord = {
         adminHash: hashSecret(adminPin),
         superAdminHash: hashSecret(superAdminPin),
         updatedAt: new Date().toISOString(),
-      });
+      };
+
+      if (!existing) {
+        const claimed = await writeStoredPinsIfAbsent(nextPinRecord);
+        if (!claimed) {
+          res.status(409).json({
+            error: 'PIN sudah diatur oleh pengguna lain secara bersamaan. Masukkan PIN Super Admin yang aktif.',
+          });
+          return;
+        }
+      } else {
+        await writeStoredPins(nextPinRecord);
+      }
 
       const issued = issueSessionToken('super_admin', secret);
       res.json(issued);
@@ -1643,7 +1774,21 @@ export function createApp() {
         warehouses,
       };
 
-      await writeSharedWarehouseState(nextState);
+      if (!forceOverwrite && hasPostgresConfig()) {
+        const cas = await writeSharedWarehouseStateCas(currentState.revision, nextState);
+        if (cas.conflict) {
+          const latestState = await readSharedWarehouseState();
+          res.status(409).json({
+            conflict: true,
+            error: 'Data gudang telah diperbarui oleh pengguna lain.',
+            latest: latestState,
+            storageMode,
+          });
+          return;
+        }
+      } else {
+        await writeSharedWarehouseState(nextState);
+      }
 
       res.json({
         ok: true,

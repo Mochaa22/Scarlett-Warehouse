@@ -373,8 +373,9 @@ export function renderInbound(root, d, an) {
   refreshSelectedDoneButton();
 
   function updateLiveMatchBadge(id, rawInb) {
-    var badge = root.querySelector('[data-match-badge="' + id + '"]');
-    var inbInp = root.querySelector('[data-admin-inbound="' + id + '"]');
+    var safeId = CSS.escape(String(id || ''));
+    var badge = root.querySelector('[data-match-badge="' + safeId + '"]');
+    var inbInp = root.querySelector('[data-admin-inbound="' + safeId + '"]');
     if (!badge || !inbInp) return;
     var skQty = Number(inbInp.getAttribute('data-sk-qty') || 0);
     var info = getMasukInboundMatch({ qty: skQty, inboundQty: rawInb === '' ? null : parseQty(rawInb) });
@@ -383,10 +384,11 @@ export function renderInbound(root, d, an) {
   }
 
   function saveAdminRow(id, nextDone, onlyUpdateFields) {
-    var byInp = root.querySelector('[data-admin-by="' + id + '"]');
-    var ketInp = root.querySelector('[data-admin-ket="' + id + '"]');
-    var inbInp = root.querySelector('[data-admin-inbound="' + id + '"]');
-    var chkEl = root.querySelector('[data-admin-chk="' + id + '"]');
+    var safeId = CSS.escape(String(id || ''));
+    var byInp = root.querySelector('[data-admin-by="' + safeId + '"]');
+    var ketInp = root.querySelector('[data-admin-ket="' + safeId + '"]');
+    var inbInp = root.querySelector('[data-admin-inbound="' + safeId + '"]');
+    var chkEl = root.querySelector('[data-admin-chk="' + safeId + '"]');
     var adminWho = (byInp ? byInp.value.trim() : '') || activeAdminDefault;
     var ketVal = ketInp ? ketInp.value.trim() : '';
     var rawInb = inbInp ? inbInp.value.trim() : '';

@@ -392,9 +392,9 @@ export function renderAnalitik(root, d, an) {
     var hOut = Math.round((x.keluar / maxDayVal) * plotH);
     var xIn = cx - barW - 1;
     var xOut = cx + 1;
-    svgParts += '<rect x="' + xIn + '" y="' + (padT + plotH - hIn) + '" width="' + barW + '" height="' + hIn + '" rx="3" fill="#16a34a"><title>' + x.tgl + ' Masuk: ' + fmtNum(x.masuk) + '</title></rect>';
-    svgParts += '<rect x="' + xOut + '" y="' + (padT + plotH - hOut) + '" width="' + barW + '" height="' + hOut + '" rx="3" fill="#b5154f"><title>' + x.tgl + ' Keluar: ' + fmtNum(x.keluar) + '</title></rect>';
-    svgParts += '<text x="' + cx + '" y="' + (svgH - 14) + '" text-anchor="middle" font-size="10" fill="var(--text-subtle)">' + x.tgl.slice(5) + '</text>';
+    svgParts += '<rect x="' + xIn + '" y="' + (padT + plotH - hIn) + '" width="' + barW + '" height="' + hIn + '" rx="3" fill="#16a34a"><title>' + esc(x.tgl) + ' Masuk: ' + fmtNum(x.masuk) + '</title></rect>';
+    svgParts += '<rect x="' + xOut + '" y="' + (padT + plotH - hOut) + '" width="' + barW + '" height="' + hOut + '" rx="3" fill="#b5154f"><title>' + esc(x.tgl) + ' Keluar: ' + fmtNum(x.keluar) + '</title></rect>';
+    svgParts += '<text x="' + cx + '" y="' + (svgH - 14) + '" text-anchor="middle" font-size="10" fill="var(--text-subtle)">' + esc(x.tgl.slice(5)) + '</text>';
   });
   svgParts += '</svg>';
 

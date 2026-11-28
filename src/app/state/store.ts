@@ -171,22 +171,6 @@ export function sessionSetRaw(key: string, val: string | null | undefined): void
   }
 }
 
-export function decodeTokenPayload(tok: string | null | undefined): Record<string, any> | null {
-  if (!tok || typeof tok !== 'string') return null;
-  const parts = tok.split('.');
-  if (parts.length !== 2 || !parts[0]) return null;
-  try {
-    let b64 = parts[0].replace(/-/g, '+').replace(/_/g, '/');
-    while (b64.length % 4) b64 += '=';
-    const json = atob(b64);
-    const obj = JSON.parse(json);
-    if (!obj || typeof obj.exp !== 'number' || Date.now() > obj.exp) return null;
-    return obj;
-  } catch {
-    return null;
-  }
-}
-
 function loadInitialSyncMeta(): SyncMeta {
   const m = safeGet<Partial<SyncMeta> | null>(SYNC_META_KEY, null);
   return {

@@ -215,3 +215,32 @@ export async function pgSetNxJson(key: string, value: unknown): Promise<boolean>
     return false;
   }
 }
+
+export async function pgCasWarehouseState<T>(
+  key: string,
+  expectedRevision: number,
+  nextValue: T
+): Promise<{ ok: boolean; conflict: boolean }> {
+  const pool = getPool();
+  if (!pool) return { ok: false, conflict: false };
+  try {
+    await ensureStoreTable(pool);
+    const res = await pool.query<{ key: string }>(
+      `INSERT INTO sgp_store (key, value, updated_at)
+       VALUES ($1, $2::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE
+       SET value = EXCLUDED.value, updated_at = NOW()
+       WHERE COALESCE((sgp_store.value->>'revision')::integer, 0) = $3
+       RETURNING key`,
+      [key, JSON.stringify(nextValue), expectedRevision]
+    );
+    if (res.rows.length > 0) {
+      return { ok: true, conflict: false };
+    }
+    return { ok: false, conflict: true };
+  } catch (err) {
+    console.error('PostgreSQL CAS write error:', err instanceof Error ? err.message : 'unknown');
+    return { ok: false, conflict: false };
+  }
+}
+

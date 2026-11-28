@@ -200,10 +200,12 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
       typeof data.error === 'string' && data.error
         ? data.error
         : `Permintaan server gagal (${res.status})`
-    ) as Error & { status?: number; needsSetup?: boolean; conflict?: boolean };
+    ) as Error & { status?: number; needsSetup?: boolean; conflict?: boolean; latest?: unknown; storageMode?: string };
     err.status = res.status;
     if (typeof data.needsSetup === 'boolean') err.needsSetup = data.needsSetup;
     if (typeof data.conflict === 'boolean') err.conflict = data.conflict;
+    if (data.latest && typeof data.latest === 'object') err.latest = data.latest;
+    if (typeof data.storageMode === 'string') err.storageMode = data.storageMode;
     throw err;
   }
   return data as T;

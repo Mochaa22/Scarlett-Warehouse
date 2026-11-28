@@ -127,7 +127,7 @@ export function renderOpname(root, d, an) {
   root.querySelectorAll('.op-fisik').forEach(function (inp) {
     inp.addEventListener('input', function () {
       var idx = Number(inp.getAttribute('data-idx'));
-      updateOpDiff(idx, parseQty(inp.value));
+      updateOpDiff(idx, Math.max(0, parseQty(inp.value)));
     });
   });
 
@@ -135,15 +135,24 @@ export function renderOpname(root, d, an) {
     var tgl = parseDate(byId('op-tgl').value);
     if (!tgl) { showToast('Tanggal opname tidak valid', 'warn'); return; }
     var adjustments = [];
+    var hasNegative = false;
     root.querySelectorAll('.op-fisik').forEach(function (inp) {
       var idx = Number(inp.getAttribute('data-idx'));
       var it = itemsAtLoc[idx];
       var fis = parseQty(inp.value);
+      if (fis < 0) {
+        hasNegative = true;
+        return;
+      }
       var diff = fis - Number(it.qty || 0);
       if (diff !== 0) {
         adjustments.push({ item: it, diff: diff });
       }
     });
+    if (hasNegative) {
+      showToast('Qty fisik tidak boleh bernilai negatif', 'warn');
+      return;
+    }
     if (adjustments.length === 0) {
       showToast('Tidak ada selisih yang perlu disesuaikan', 'warn');
       return;

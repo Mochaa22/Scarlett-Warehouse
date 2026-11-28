@@ -544,7 +544,8 @@ export function renderInboundRegister(root, warehouseId, master) {
   });
 
   section.querySelector('#inbound-register-rows').addEventListener('click', function (event) {
-    var button = event.target.closest('[data-edit-surat-jalan], [data-delete-surat-jalan]');
+    var tgt = event.target instanceof Element ? event.target : null;
+    var button = tgt ? tgt.closest('[data-edit-surat-jalan], [data-delete-surat-jalan]') : null;
     if (!button) return;
     var editing = button.hasAttribute('data-edit-surat-jalan');
     var index = Number(button.getAttribute(editing ? 'data-edit-surat-jalan' : 'data-delete-surat-jalan'));

@@ -34,10 +34,11 @@ export function saveRegistry(syncShared?: boolean) {
 }
 
 export function getWhMeta(wid) {
-  for (var i = 0; i < appState.W.list.length; i++) {
-    if (appState.W.list[i].id === wid) return appState.W.list[i];
+  var list = (appState.W && Array.isArray(appState.W.list)) ? appState.W.list : [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].id === wid) return list[i];
   }
-  return appState.W.list[0];
+  return list[0] || { id: wid || 'gp1', nama: 'Scarlett GP1', legacy: true };
 }
 
 export function whPrefix(wid) {
@@ -447,6 +448,53 @@ export async function pushSharedWarehouseState(forceInitialPush?: boolean) {
       appState.sharedSyncState.dirty = false;
       saveSyncPersistence(false);
       void syncAppAuthStatus(true);
+    } else if (err && (err.status === 409 || err.conflict) && err.latest && Array.isArray(err.latest.warehousesMeta)) {
+      var remoteLatest = err.latest;
+      var baseSnap = appState.sharedSyncState.lastSyncedSnapshot || appState.sharedSyncState.snapshot || safeGet(SYNC_BASE_KEY, null) || null;
+      var localSnapConflict = buildSharedSnapshotFromLocal();
+      var mergedSnap = mergeSnapshots3Way(baseSnap, localSnapConflict, remoteLatest);
+      applySharedStateLocally({
+        revision: Number(remoteLatest.revision || 0),
+        warehousesMeta: mergedSnap.warehousesMeta,
+        warehouses: mergedSnap.warehouses
+      });
+      appState.sharedSyncState.lastSyncedSnapshot = cloneJsonSafe({
+        warehousesMeta: remoteLatest.warehousesMeta,
+        warehouses: remoteLatest.warehouses || {}
+      });
+      if (err.storageMode) appState.sharedSyncState.storageMode = err.storageMode;
+      triggerRenderOrDefer();
+      try {
+        var resolvedRes = await window.__sgpCloud.warehouse.saveState(
+          {
+            baseRevision: Number(remoteLatest.revision || 0),
+            warehousesMeta: mergedSnap.warehousesMeta,
+            warehouses: mergedSnap.warehouses
+          },
+          appState.appAuthToken || null
+        );
+        if (resolvedRes && resolvedRes.ok) {
+          appState.sharedSyncState.revision = Number(resolvedRes.revision || 0);
+          appState.sharedSyncState.snapshot = cloneJsonSafe(mergedSnap);
+          appState.sharedSyncState.lastSyncedSnapshot = appState.sharedSyncState.snapshot;
+          appState.sharedSyncState.pending = false;
+          appState.sharedSyncState.dirty = false;
+          appState.sharedSyncState.retryDelayMs = 2000;
+          appState.sharedSyncState.lastError = '';
+          appState.sharedSyncState.offlineNotified = false;
+          if (resolvedRes.storageMode) appState.sharedSyncState.storageMode = resolvedRes.storageMode;
+          saveSyncPersistence(true);
+          refreshRealtimeSubscription();
+          showToast('Perubahan lintas perangkat digabungkan otomatis & tersimpan.', 'info');
+          return;
+        }
+      } catch (mergePushErr) {
+        appState.sharedSyncState.lastError = (mergePushErr && mergePushErr.message) || msg;
+      }
+      appState.sharedSyncState.pending = true;
+      appState.sharedSyncState.dirty = true;
+      saveSyncPersistence(false);
+      scheduleSharedSyncRetry();
     } else {
       appState.sharedSyncState.pending = true;
       appState.sharedSyncState.dirty = true;
